@@ -1,0 +1,21 @@
+{
+  "name": "repobot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "server": "node app.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "octokit": "^4.1.0"
+  },
+  "devDependencies": {
+    "smee-client": "^2.0.4"
+  }
+}
