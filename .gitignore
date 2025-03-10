@@ -1,3 +1,6 @@
 /node_modules
 /.env
 /repotestapp.2025-02-05.private-key.pem
+chroma.log
+/chroma-data
+```
