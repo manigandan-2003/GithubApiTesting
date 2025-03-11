@@ -229,7 +229,7 @@ async function run(chunks) {
 
     // Filter out empty content
     const validChunks = chunks.filter((chunk) => chunk.content.trim() !== "");
-    console.log("Valid chunks:", validChunks);
+    //console.log("Valid chunks:", validChunks);
 
     if (validChunks.length === 0) {
       console.log("No valid chunks to add.");
@@ -237,8 +237,11 @@ async function run(chunks) {
     }
 
     // Prepare data for ChromaDB
-    const documents = validChunks.map((chunk) => chunk.content);
+    const documents = validChunks.map(
+      (chunk) => `${chunk.file_path}: ${chunk.content}`
+    );
     console.log("Documents:", documents);
+
     const ids = validChunks.map(
       (chunk) => `doc_${chunk.file_path}_${chunk.chunk_index}`
     );
@@ -250,7 +253,7 @@ async function run(chunks) {
     // Add chunks to ChromaDB
     await collection.add({ documents, ids, metadatas });
 
-    console.log("Chunks added successfully!");
+    //console.log("Chunks added successfully!");
   } catch (error) {
     console.error("Error:", error);
   }
@@ -306,6 +309,7 @@ async function query(issueBody) {
 
   // You can use the results to help resolve the issue
   // For example, extracting relevant code snippets or documentation sections
+  console.log("Relevant context paths:", results.documents);
   return results;
 }
 
@@ -348,7 +352,7 @@ async function handleIssueOpened({ octokit, payload }) {
       //console.log("Chunks:", chunks);
       await run(chunks);
       const context = await query(payload.issue.body);
-      console.log("Context:", context.documents);
+      console.log("Context:", context);
 
       const fix = await generateFix(payload.issue.body, context);
       if (fix) {
@@ -367,26 +371,115 @@ async function handleIssueOpened({ octokit, payload }) {
   }
 }
 
+function extractJson(text) {
+  const match = text.match(/\{[\s\S]*\}/); // Match everything between the first and last curly brace
+  return match ? JSON.parse(match[0]) : null;
+}
+
 async function generateFix(issueBody, context = "") {
   const genAI = new GoogleGenerativeAI(geminiApiKey);
   const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-  const prompt = `Fix the following issue in the code and give only code and ignore irrelavant info: ${issueBody} and with the context ${context.ids} ${context.documents} `; // Update the prompt as needed
+  const prompt = `Fix the following issue in the code and give only file path and its code 
+  and ignore irrelavant info and the output should always be of the format only of a 
+  json object {filepath1: content1 , filepath2: content2 ...} and dont return the json object wrapped in a backticks + json: ${issueBody} and with the context ${context.documents} `; // Update the prompt as needed
 
   console.log("Sending request to Gemini API with prompt:", prompt);
   try {
     const result = await model.generateContent(prompt);
-    console.log("Gemini API response:", result);
-    return result.response.text();
+    const processedresult = extractJson(result.response.text());
+    console.log("Generated fix:", processedresult);
+    return processedresult;
   } catch (error) {
     console.error("Error generating fix:", error);
     return "";
   }
 }
 
+// async function createPR(octokit, payload, fix) {
+//   const branchName = `auto-fix-${payload.issue.number}`;
+//   // const filePath = "rahul.js"; // Update this with the actual file path
+
+//   try {
+//     const {
+//       data: { default_branch },
+//     } = await octokit.request("GET /repos/{owner}/{repo}", {
+//       owner: payload.repository.owner.login,
+//       repo: payload.repository.name,
+//     });
+
+//     console.log("Default branch:", default_branch);
+
+//     const {
+//       data: {
+//         object: { sha: baseSha },
+//       },
+//     } = await octokit.request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
+//       owner: payload.repository.owner.login,
+//       repo: payload.repository.name,
+//       ref: `heads/${default_branch}`,
+//     });
+
+//     console.log("Base SHA:", baseSha);
+
+//     const {
+//       data: { sha: newBranchSha },
+//     } = await octokit.request("POST /repos/{owner}/{repo}/git/refs", {
+//       owner: payload.repository.owner.login,
+//       repo: payload.repository.name,
+//       ref: `refs/heads/${branchName}`,
+//       sha: baseSha,
+//     });
+
+//     console.log("New branch SHA:", newBranchSha);
+
+//     const { data: fileData } = await octokit.request(
+//       "GET /repos/{owner}/{repo}/contents/{path}",
+//       {
+//         owner: payload.repository.owner.login,
+//         repo: payload.repository.name,
+//         path: filePath,
+//       }
+//     );
+
+//     console.log("Existing file SHA:", fileData.sha);
+
+//     await octokit.request("PUT /repos/{owner}/{repo}/contents/{path}", {
+//       owner: payload.repository.owner.login,
+//       repo: payload.repository.name,
+//       path: filePath,
+//       message: `Fix issue #${payload.issue.number}`,
+//       content: Buffer.from(JSON.stringify(fix)).toString("base64"),
+//       sha: fileData.sha,
+//       branch: branchName,
+//     });
+
+//     console.log("File updated on branch:", branchName);
+
+//     await octokit.request("POST /repos/{owner}/{repo}/pulls", {
+//       owner: payload.repository.owner.login,
+//       repo: payload.repository.name,
+//       title: `Fix issue #${payload.issue.number}`,
+//       body: "Automated fix for the issue using Gemini API",
+//       head: branchName,
+//       base: default_branch,
+//     });
+
+//     console.log("Pull request created.");
+//   } catch (error) {
+//     console.error("Error creating PR:", error);
+//     if (error.response) {
+//       console.error(
+//         `Status: ${error.response.status}, Message: ${JSON.stringify(
+//           error.response.data
+//         )}`
+//       );
+//     }
+//   }
+// }
+
 async function createPR(octokit, payload, fix) {
   const branchName = `auto-fix-${payload.issue.number}`;
-  const filePath = "rahul.js"; // Update this with the actual file path
 
   try {
     const {
@@ -398,6 +491,7 @@ async function createPR(octokit, payload, fix) {
 
     console.log("Default branch:", default_branch);
 
+    // Step 1: Get Base Commit SHA
     const {
       data: {
         object: { sha: baseSha },
@@ -410,40 +504,100 @@ async function createPR(octokit, payload, fix) {
 
     console.log("Base SHA:", baseSha);
 
-    const {
-      data: { sha: newBranchSha },
-    } = await octokit.request("POST /repos/{owner}/{repo}/git/refs", {
+    // Step 2: Create a new branch
+    await octokit.request("POST /repos/{owner}/{repo}/git/refs", {
       owner: payload.repository.owner.login,
       repo: payload.repository.name,
       ref: `refs/heads/${branchName}`,
       sha: baseSha,
     });
 
-    console.log("New branch SHA:", newBranchSha);
+    console.log("New branch created:", branchName);
 
-    const { data: fileData } = await octokit.request(
-      "GET /repos/{owner}/{repo}/contents/{path}",
+    // Step 3: Fetch existing tree SHA
+    const {
+      data: { sha: treeSha },
+    } = await octokit.request(
+      "GET /repos/{owner}/{repo}/git/commits/{commit_sha}",
       {
         owner: payload.repository.owner.login,
         repo: payload.repository.name,
-        path: filePath,
+        commit_sha: baseSha,
       }
     );
 
-    console.log("Existing file SHA:", fileData.sha);
+    console.log("Tree SHA:", treeSha);
 
-    await octokit.request("PUT /repos/{owner}/{repo}/contents/{path}", {
+    // Step 4: Create a new tree with multiple file updates
+    const treeItems = await Promise.all(
+      Object.entries(fix).map(async ([filePath, fileContent]) => {
+        try {
+          // Get file's existing SHA (if it exists)
+          const { data: fileData } = await octokit.request(
+            "GET /repos/{owner}/{repo}/contents/{path}",
+            {
+              owner: payload.repository.owner.login,
+              repo: payload.repository.name,
+              path: filePath,
+            }
+          );
+          console.log(`Existing file SHA for ${filePath}:`, fileData.sha);
+
+          return {
+            path: filePath,
+            mode: "100644",
+            type: "blob",
+            content: fileContent,
+          };
+        } catch (error) {
+          console.log(`File ${filePath} does not exist. Creating new file.`);
+          return {
+            path: filePath,
+            mode: "100644",
+            type: "blob",
+            content: fileContent,
+          };
+        }
+      })
+    );
+
+    const { data: newTree } = await octokit.request(
+      "POST /repos/{owner}/{repo}/git/trees",
+      {
+        owner: payload.repository.owner.login,
+        repo: payload.repository.name,
+        base_tree: treeSha,
+        tree: treeItems,
+      }
+    );
+
+    console.log("New tree created:", newTree.sha);
+
+    // Step 5: Create a new commit pointing to the new tree
+    const { data: newCommit } = await octokit.request(
+      "POST /repos/{owner}/{repo}/git/commits",
+      {
+        owner: payload.repository.owner.login,
+        repo: payload.repository.name,
+        message: `Fix issue #${payload.issue.number}`,
+        tree: newTree.sha,
+        parents: [baseSha],
+      }
+    );
+
+    console.log("New commit created:", newCommit.sha);
+
+    // Step 6: Update the branch to point to the new commit
+    await octokit.request("PATCH /repos/{owner}/{repo}/git/refs/{ref}", {
       owner: payload.repository.owner.login,
       repo: payload.repository.name,
-      path: filePath,
-      message: `Fix issue #${payload.issue.number}`,
-      content: Buffer.from(fix).toString("base64"),
-      sha: fileData.sha,
-      branch: branchName,
+      ref: `heads/${branchName}`,
+      sha: newCommit.sha,
     });
 
-    console.log("File updated on branch:", branchName);
+    console.log("Branch updated with new commit:", branchName);
 
+    // Step 7: Create a pull request
     await octokit.request("POST /repos/{owner}/{repo}/pulls", {
       owner: payload.repository.owner.login,
       repo: payload.repository.name,
