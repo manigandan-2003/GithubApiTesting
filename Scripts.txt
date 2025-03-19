@@ -1,0 +1,5 @@
+githb api server - npx smee -u https://smee.io/rhgBgCzfQFuJTKyq -t http://localhost:3000/api/webhook
+
+local server - npm run server
+
+chromadb server - chroma run --path ./chroma-data --host 127.0.0.1 --port 8000

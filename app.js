@@ -3,8 +3,10 @@ import { App } from "octokit";
 import { createNodeMiddleware } from "@octokit/webhooks";
 import fs from "fs";
 import http from "http";
-import axios from "axios";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import fpath from "path";
+import csvParser from "csv-parser";
+import { ChromaClient } from "chromadb";
 
 dotenv.config();
 
@@ -71,10 +73,23 @@ async function getAllFilesWithContents(octokit, owner, repo, path = "") {
   }
 }
 
-import fpath from "path";
-import csvParser from "csv-parser";
+function isCodeFile(ext) {
+  return [
+    ".js",
+    ".ts",
+    ".py",
+    ".java",
+    ".cpp",
+    ".c",
+    ".cs",
+    ".go",
+    ".rb",
+    ".php",
+    ".swift",
+    ".rs",
+  ].includes(ext);
+}
 
-// ✅ Main function to chunk a file
 async function chunkFile(filePath, content) {
   const ext = fpath.extname(filePath).toLowerCase();
   let chunks = [];
@@ -99,25 +114,6 @@ async function chunkFile(filePath, content) {
   }));
 }
 
-// ✅ Function to check if a file is a code file
-function isCodeFile(ext) {
-  return [
-    ".js",
-    ".ts",
-    ".py",
-    ".java",
-    ".cpp",
-    ".c",
-    ".cs",
-    ".go",
-    ".rb",
-    ".php",
-    ".swift",
-    ".rs",
-  ].includes(ext);
-}
-
-// ✅ Chunking for Code Files (Functions, Classes & Logical Blocks)
 function chunkCode(content) {
   const functionRegex =
     /(def |function |const |let |var |class |public |private |protected )\s+\w+\s*\(.*?\)\s*{?/g;
@@ -130,13 +126,11 @@ function chunkCode(content) {
   return mergeSmallChunks(matches, 300);
 }
 
-// ✅ Chunking for `.txt` and `.md` files (by paragraph but ensuring size)
 function chunkText(content) {
   const paragraphs = content.split(/\n{2,}/); // Split by double new lines
   return mergeSmallChunks(paragraphs, 300);
 }
 
-// ✅ Chunking for `.json` files (convert key-value pairs into meaningful chunks)
 function chunkJSON(content) {
   try {
     const jsonData = JSON.parse(content);
@@ -150,7 +144,6 @@ function chunkJSON(content) {
   }
 }
 
-// ✅ Chunking for `.csv` files
 function chunkCSV(content) {
   return new Promise((resolve) => {
     const results = [];
@@ -171,7 +164,6 @@ function chunkCSV(content) {
   });
 }
 
-// ✅ Merge small chunks together to ensure optimal size (~300-500 tokens)
 function mergeSmallChunks(chunks, minTokenSize) {
   let mergedChunks = [];
   let buffer = "";
@@ -190,7 +182,6 @@ function mergeSmallChunks(chunks, minTokenSize) {
   return mergedChunks;
 }
 
-// ✅ Token-based fallback chunking
 function chunkByTokens(content, tokenSize) {
   const words = content.split(/\s+/);
   let chunks = [];
@@ -211,16 +202,12 @@ function chunkByTokens(content, tokenSize) {
   return chunks;
 }
 
-import { ChromaClient } from "chromadb";
-
-// Connect to ChromaDB (local persistent storage)
 const client = new ChromaClient({ host: "http://127.0.0.1:8000" });
 async function run(chunks) {
   try {
     const heartbeat = await client.heartbeat();
     console.log("ChromaDB heartbeat:", heartbeat);
 
-    // Create or retrieve a collection
     const collection = await client.getOrCreateCollection({
       name: "my_collection",
     });
@@ -229,7 +216,6 @@ async function run(chunks) {
 
     // Filter out empty content
     const validChunks = chunks.filter((chunk) => chunk.content.trim() !== "");
-    //console.log("Valid chunks:", validChunks);
 
     if (validChunks.length === 0) {
       console.log("No valid chunks to add.");
@@ -253,47 +239,12 @@ async function run(chunks) {
     // Add chunks to ChromaDB
     await collection.add({ documents, ids, metadatas });
 
-    //console.log("Chunks added successfully!");
   } catch (error) {
     console.error("Error:", error);
   }
 }
-// async function run(chunks) {
-//   const heartbeat = await client.heartbeat();
-//   console.log("ChromaDB heartbeat:", heartbeat);
-//   // Create or retrieve a collection
-//   const collection = await client.getOrCreateCollection({
-//     name: "my_collection",
-//   });
-
-//   console.log("Collection created or retrieved:", collection.name);
-
-//   // Filter out empty content
-//   const validChunks = chunks.filter((chunk) => chunk.content.trim() !== "");
-
-//   if (validChunks.length === 0) {
-//     console.log("No valid chunks to add.");
-//     return;
-//   }
-
-//   // Prepare data for ChromaDB
-//   const documents = validChunks.map((chunk) => chunk.content);
-//   const ids = validChunks.map(
-//     (chunk) => `doc_${chunk.file_path}_${chunk.chunk_index}`
-//   );
-//   const metadatas = validChunks.map((chunk) => ({
-//     file_path: chunk.file_path,
-//     chunk_index: chunk.chunk_index,
-//   }));
-
-//   // Add chunks to ChromaDB
-//   await collection.add({ documents, ids, metadatas });
-
-//   console.log("Chunks added successfully!");
-// }
 
 async function query(issueBody) {
-  // Create or retrieve a collection
   const collection = await client.getOrCreateCollection({
     name: "my_collection",
   });
@@ -303,72 +254,8 @@ async function query(issueBody) {
     queryTexts: [issueBody], // Query the collection with the issue body
     nResults: 3, // You can adjust this number depending on how many results you want to retrieve
   });
-
-  // Process the results (in this case, log them)
-  //console.log("Relevant context retrieved for the issue:", results);
-
-  // You can use the results to help resolve the issue
-  // For example, extracting relevant code snippets or documentation sections
   console.log("Relevant context paths:", results.documents);
   return results;
-}
-
-const messageForNewIssues =
-  "Thanks for opening a new issue! Our bot will attempt to fix it automatically.";
-
-async function handleIssueOpened({ octokit, payload }) {
-  console.log(`Received an issue event for #${payload.issue.number}`);
-
-  try {
-    await octokit.request(
-      "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
-      {
-        owner: payload.repository.owner.login,
-        repo: payload.repository.name,
-        issue_number: payload.issue.number,
-        body: messageForNewIssues,
-        headers: {
-          "x-github-api-version": "2022-11-28",
-        },
-      }
-    );
-
-    console.log("Comment added to issue.");
-
-    // Usage
-    (async () => {
-      const chunks = [];
-      const repoFiles = await getAllFilesWithContents(
-        octokit,
-        payload.repository.owner.login,
-        payload.repository.name
-      );
-      //console.log("Code files with contents:", repoFiles);
-
-      for (const [filePath, content] of Object.entries(repoFiles)) {
-        const currentchunk = await chunkFile(filePath, content);
-        chunks.push(...currentchunk);
-      }
-      //console.log("Chunks:", chunks);
-      await run(chunks);
-      const context = await query(payload.issue.body);
-      console.log("Context:", context);
-
-      const fix = await generateFix(payload.issue.body, context);
-      if (fix) {
-        await createPR(octokit, payload, fix);
-      }
-    })();
-  } catch (error) {
-    console.error("Error handling issue opened:", error);
-    if (error.response) {
-      console.error(
-        `Status: ${error.response.status}, Message: ${JSON.stringify(
-          error.response.data
-        )}`
-      );
-    }
-  }
 }
 
 function extractJson(text) {
@@ -395,88 +282,6 @@ async function generateFix(issueBody, context = "") {
     return "";
   }
 }
-
-// async function createPR(octokit, payload, fix) {
-//   const branchName = `auto-fix-${payload.issue.number}`;
-//   // const filePath = "rahul.js"; // Update this with the actual file path
-
-//   try {
-//     const {
-//       data: { default_branch },
-//     } = await octokit.request("GET /repos/{owner}/{repo}", {
-//       owner: payload.repository.owner.login,
-//       repo: payload.repository.name,
-//     });
-
-//     console.log("Default branch:", default_branch);
-
-//     const {
-//       data: {
-//         object: { sha: baseSha },
-//       },
-//     } = await octokit.request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
-//       owner: payload.repository.owner.login,
-//       repo: payload.repository.name,
-//       ref: `heads/${default_branch}`,
-//     });
-
-//     console.log("Base SHA:", baseSha);
-
-//     const {
-//       data: { sha: newBranchSha },
-//     } = await octokit.request("POST /repos/{owner}/{repo}/git/refs", {
-//       owner: payload.repository.owner.login,
-//       repo: payload.repository.name,
-//       ref: `refs/heads/${branchName}`,
-//       sha: baseSha,
-//     });
-
-//     console.log("New branch SHA:", newBranchSha);
-
-//     const { data: fileData } = await octokit.request(
-//       "GET /repos/{owner}/{repo}/contents/{path}",
-//       {
-//         owner: payload.repository.owner.login,
-//         repo: payload.repository.name,
-//         path: filePath,
-//       }
-//     );
-
-//     console.log("Existing file SHA:", fileData.sha);
-
-//     await octokit.request("PUT /repos/{owner}/{repo}/contents/{path}", {
-//       owner: payload.repository.owner.login,
-//       repo: payload.repository.name,
-//       path: filePath,
-//       message: `Fix issue #${payload.issue.number}`,
-//       content: Buffer.from(JSON.stringify(fix)).toString("base64"),
-//       sha: fileData.sha,
-//       branch: branchName,
-//     });
-
-//     console.log("File updated on branch:", branchName);
-
-//     await octokit.request("POST /repos/{owner}/{repo}/pulls", {
-//       owner: payload.repository.owner.login,
-//       repo: payload.repository.name,
-//       title: `Fix issue #${payload.issue.number}`,
-//       body: "Automated fix for the issue using Gemini API",
-//       head: branchName,
-//       base: default_branch,
-//     });
-
-//     console.log("Pull request created.");
-//   } catch (error) {
-//     console.error("Error creating PR:", error);
-//     if (error.response) {
-//       console.error(
-//         `Status: ${error.response.status}, Message: ${JSON.stringify(
-//           error.response.data
-//         )}`
-//       );
-//     }
-//   }
-// }
 
 async function createPR(octokit, payload, fix) {
   const branchName = `auto-fix-${payload.issue.number}`;
@@ -610,6 +415,63 @@ async function createPR(octokit, payload, fix) {
     console.log("Pull request created.");
   } catch (error) {
     console.error("Error creating PR:", error);
+    if (error.response) {
+      console.error(
+        `Status: ${error.response.status}, Message: ${JSON.stringify(
+          error.response.data
+        )}`
+      );
+    }
+  }
+}
+
+const messageForNewIssues =
+  "Thanks for opening a new issue! Our bot will attempt to fix it automatically.";
+
+async function handleIssueOpened({ octokit, payload }) {
+  console.log(`Received an issue event for #${payload.issue.number}`);
+
+  try {
+    await octokit.request(
+      "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+      {
+        owner: payload.repository.owner.login,
+        repo: payload.repository.name,
+        issue_number: payload.issue.number,
+        body: messageForNewIssues,
+        headers: {
+          "x-github-api-version": "2022-11-28",
+        },
+      }
+    );
+
+    console.log("Comment added to issue.");
+
+    // Usage
+    (async () => {
+      const chunks = [];
+      const repoFiles = await getAllFilesWithContents(
+        octokit,
+        payload.repository.owner.login,
+        payload.repository.name
+      );
+
+      for (const [filePath, content] of Object.entries(repoFiles)) {
+        const currentchunk = await chunkFile(filePath, content);
+        chunks.push(...currentchunk);
+      }
+      
+      await run(chunks);
+      const context = await query(payload.issue.body);
+      console.log("Context:", context);
+
+      const fix = await generateFix(payload.issue.body, context);
+      if (fix) {
+        await createPR(octokit, payload, fix);
+      }
+    })();
+  } catch (error) {
+    console.error("Error handling issue opened:", error);
     if (error.response) {
       console.error(
         `Status: ${error.response.status}, Message: ${JSON.stringify(
