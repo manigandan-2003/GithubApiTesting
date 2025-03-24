@@ -238,24 +238,113 @@ async function run(chunks) {
 
     // Add chunks to ChromaDB
     await collection.add({ documents, ids, metadatas });
-
   } catch (error) {
     console.error("Error:", error);
   }
 }
 
-async function query(issueBody) {
+// async function query(issueBody) {
+//   const collection = await client.getOrCreateCollection({
+//     name: "my_collection",
+//   });
+
+//   // Perform the query to get relevant context for solving the issue
+//   const results = await collection.query({
+//     queryTexts: [issueBody], // Query the collection with the issue body
+//     nResults: 3, // You can adjust this number depending on how many results you want to retrieve
+//   });
+//   // console.log("Relevant context paths:", results.documents);
+//   console.log("Results:", results);
+//   return results;
+// }
+
+// Function to determine how much context is needed
+
+function decideContextSize(
+  avgDistance,
+  matchedKeywords,
+  maxPossibleResults = 10
+) {
+  // Decay exponent controls how fast context shrinks as avgDistance increases.
+  const decayExponent = 3.5;
+  // A modest boost per keyword to slightly increase context when matches exist.
+  const keywordBoost = 0.2;
+
+  // Compute a base size that decreases with higher avgDistance.
+  let baseSize = maxPossibleResults / Math.pow(avgDistance, decayExponent);
+  // Add a bonus based on matched keywords.
+  let dynamicContextSize = baseSize + matchedKeywords * keywordBoost;
+
+  // Round and ensure the result is between 1 and maxPossibleResults.
+  return Math.max(
+    1,
+    Math.min(Math.round(dynamicContextSize), maxPossibleResults)
+  );
+}
+
+// Function to check if issue mentions existing keywords in retrieved code
+function checkKeywordOverlap(issueBody, documents) {
+  let issueWords = new Set(issueBody.toLowerCase().split(/\W+/));
+  let matchedKeywords = 0;
+
+  for (let doc of documents) {
+    let docWords = new Set(doc.toLowerCase().split(/\W+/));
+    for (let word of issueWords) {
+      if (docWords.has(word)) {
+        matchedKeywords++;
+      }
+    }
+  }
+  return matchedKeywords;
+}
+
+// Rough estimation of tokens in a document
+function estimateTokens(text) {
+  return Math.ceil(text.split(/\s+/).length * 1.5);
+}
+
+async function query(issueBody, maxTokens = 4096, bufferTokens = 1000) {
   const collection = await client.getOrCreateCollection({
     name: "my_collection",
   });
 
-  // Perform the query to get relevant context for solving the issue
-  const results = await collection.query({
-    queryTexts: [issueBody], // Query the collection with the issue body
-    nResults: 3, // You can adjust this number depending on how many results you want to retrieve
+  let initialResults = await collection.query({
+    queryTexts: [issueBody],
+    nResults: 10, // Fetch more initially to analyze relevance
   });
-  console.log("Relevant context paths:", results.documents);
-  return results;
+
+  let relevantDocuments = [];
+  let totalTokens = 0;
+  let avgDistance = 0;
+
+  if (initialResults.distances[0]) {
+    avgDistance =
+      initialResults.distances[0].reduce((a, b) => a + b, 0) /
+      initialResults.distances[0].length;
+  }
+
+  let matchedKeywords = checkKeywordOverlap(
+    issueBody,
+    initialResults.documents[0]
+  );
+
+  let nResults = decideContextSize(avgDistance, matchedKeywords);
+  console.log("Number of results to fetch:", nResults);
+
+  let finalResults = await collection.query({
+    queryTexts: [issueBody],
+    nResults: nResults,
+  });
+
+  for (let doc of finalResults.documents[0]) {
+    let docTokens = estimateTokens(doc);
+    if (totalTokens + docTokens > maxTokens - bufferTokens) break;
+    totalTokens += docTokens;
+    relevantDocuments.push(doc);
+  }
+
+  console.log("Final context selected:", relevantDocuments);
+  return relevantDocuments;
 }
 
 function extractJson(text) {
@@ -267,9 +356,26 @@ async function generateFix(issueBody, context = "") {
   const genAI = new GoogleGenerativeAI(geminiApiKey);
   const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-  const prompt = `Fix the following issue in the code and give only file path and its code 
-  and ignore irrelavant info and the output should always be of the format only of a 
-  json object {filepath1: content1 , filepath2: content2 ...} and dont return the json object wrapped in a backticks + json: ${issueBody} and with the context ${context.documents} `; // Update the prompt as needed
+  // const prompt = `Your a github bot helping other coders/developers by fixing their code or by writing helpful code.
+  // Fix the following issue in the code by modifying necessary files, adding or deleting files if required.
+  // Even though you are a bot that is for helping others code, think before adding/modifying/deleting existing working code.
+  // Don't overwrite working code that might be used in other files.
+  // Stick to the intructions as much as possible.
+  // Make your code as clean, modular and structured as possible.
+  // Use only the relevant context and ignore all unnecessary information.
+  // The output should strictly follow the format of a JSON object {filepath1: content1, filepath2: content2, ...} without being wrapped in backticks.
+  // Issue: ${issueBody}
+  // Context: ${context}`;
+
+  const prompt = `You're a GitHub bot that helps developers by fixing or enhancing their code. 
+  Fix the following issue by modifying necessary files, adding new files if required, or appending new code where appropriate. 
+  Do not remove or overwrite any existing working code that may be used elsewhere, but you may add to it. 
+  If a file contains working code, preserve it and add the new functionality in a way that integrates with the existing code.
+  Make your code clean, modular, and structured.
+  Use only the relevant context and ignore unnecessary information.
+  The output should strictly follow the format of a JSON object {filepath1: content1, filepath2: content2, ...} without being wrapped in backticks.
+  Issue: ${issueBody}  
+  Context: ${context}`;
 
   console.log("Sending request to Gemini API with prompt:", prompt);
   try {
@@ -460,7 +566,7 @@ async function handleIssueOpened({ octokit, payload }) {
         const currentchunk = await chunkFile(filePath, content);
         chunks.push(...currentchunk);
       }
-      
+
       await run(chunks);
       const context = await query(payload.issue.body);
       console.log("Context:", context);
