@@ -352,7 +352,7 @@ function extractJson(text) {
   return match ? JSON.parse(match[0]) : null;
 }
 
-async function generateFix(issueBody, context = "") {
+async function generateFix(issueBody, context = "", feedback = "") {
   const genAI = new GoogleGenerativeAI(geminiApiKey);
   const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
@@ -372,9 +372,11 @@ async function generateFix(issueBody, context = "") {
   Do not remove or overwrite any existing working code that may be used elsewhere, but you may add to it. 
   If a file contains working code, preserve it and add the new functionality in a way that integrates with the existing code.
   Make your code clean, modular, and structured.
+  If there is any feedback, write your code according to the feedback.
   Use only the relevant context and ignore unnecessary information.
   The output should strictly follow the format of a JSON object {filepath1: content1, filepath2: content2, ...} without being wrapped in backticks.
-  Issue: ${issueBody}  
+  Issue: ${issueBody}
+  Feedback: ${feedback}  
   Context: ${context}`;
 
   console.log("Sending request to Gemini API with prompt:", prompt);
@@ -390,7 +392,7 @@ async function generateFix(issueBody, context = "") {
 }
 
 async function createPR(octokit, payload, fix) {
-  const branchName = `auto-fix-${payload.issue.number}`;
+  const branchName = `auto-fix-${payload.issue.number}-${Date.now()}`;
 
   try {
     const {
@@ -534,24 +536,26 @@ async function createPR(octokit, payload, fix) {
 const messageForNewIssues =
   "Thanks for opening a new issue! Our bot will attempt to fix it automatically.";
 
-async function handleIssueOpened({ octokit, payload }) {
+async function handleIssueOpened({ octokit, payload }, reply = "") {
   console.log(`Received an issue event for #${payload.issue.number}`);
 
   try {
-    await octokit.request(
-      "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
-      {
-        owner: payload.repository.owner.login,
-        repo: payload.repository.name,
-        issue_number: payload.issue.number,
-        body: messageForNewIssues,
-        headers: {
-          "x-github-api-version": "2022-11-28",
-        },
-      }
-    );
+    if (!reply) {
+      await octokit.request(
+        "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+        {
+          owner: payload.repository.owner.login,
+          repo: payload.repository.name,
+          issue_number: payload.issue.number,
+          body: messageForNewIssues,
+          headers: {
+            "x-github-api-version": "2022-11-28",
+          },
+        }
+      );
 
-    console.log("Comment added to issue.");
+      console.log("Comment added to issue.");
+    }
 
     // Usage
     (async () => {
@@ -571,7 +575,7 @@ async function handleIssueOpened({ octokit, payload }) {
       const context = await query(payload.issue.body);
       console.log("Context:", context);
 
-      const fix = await generateFix(payload.issue.body, context);
+      const fix = await generateFix(payload.issue.body, context, reply);
       if (fix) {
         await createPR(octokit, payload, fix);
       }
@@ -588,7 +592,109 @@ async function handleIssueOpened({ octokit, payload }) {
   }
 }
 
-app.webhooks.on("issues.opened", handleIssueOpened);
+async function generateResponse(commentText) {
+  const genAI = new GoogleGenerativeAI(geminiApiKey);
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+  const prompt = `You are assigned a job to come up with the response to a comment on a PR.
+  If the comment does not require a response, then label must be 0, reply must be "".
+  If the comment requires a response to the comment but no change in the code is required, then label must be 1 and reply must have an approriate comment.
+  If the comment does not require a response and the issue is not resolved or any change in the code is suggested, then label must be 2 and reply must be "".
+  If the comment requires a response and the issue is not resolved or any change in the code is suggested, then label must be 3 and reply must have an approriate comment.
+  The output should strictly follow the format, where 1st line is the label (0, 1 , 2 or 3) and 2nd line is the reply.
+  Comment: ${commentText}`;
+
+  console.log("generateResponse prompt:", prompt);
+  try {
+    const result = await model.generateContent(prompt);
+    const processedresult = result.response.text().split("\n");
+    console.log("Generated response:", processedresult);
+    return processedresult;
+  } catch (error) {
+    console.error("Error generating response:", error);
+    return [];
+  }
+}
+
+async function handleBotPRComment({ octokit, payload }) {
+  const commentText = payload.comment.body;
+  try {
+    const response = await generateResponse(commentText);
+    if (response[0] == "1" || response[0] == "3") {
+      await octokit.request(
+        "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+        {
+          owner: payload.repository.owner.login,
+          repo: payload.repository.name,
+          issue_number: payload.issue.number,
+          body: response[1],
+          headers: {
+            "x-github-api-version": "2022-11-28",
+          },
+        }
+      );
+    }
+    if (response[0] == "2" || response[0] == "3") {
+      await handleIssueOpened({ octokit, payload }, commentText);
+    }
+  } catch (error) {
+    console.error("Error handling bot PR comment:", error);
+    if (error.response) {
+      console.error(
+        `Status: ${error.response.status}, Message: ${JSON.stringify(
+          error.response.data
+        )}`
+      );
+    }
+  }
+}
+
+app.webhooks.on(
+  ["issues.opened", "issues.edited", "issues.reopened"],
+  async (context) => {
+    const issue = context.payload.issue;
+    const labels = issue.labels.map((label) => label.name);
+
+    if (labels.includes("RepoBot")) {
+      console.log("Bot label detected, calling handleIssueOpened...");
+      await handleIssueOpened(context);
+    }
+  }
+);
+
+app.webhooks.on("issue_comment.created", async (context) => {
+  const comment = context.payload.comment;
+  const issue = context.payload.issue;
+  const repository = context.payload.repository;
+
+  // Ignore comments made by the bot itself
+  if (comment.user.type === "Bot" || comment.user.type === "bot") {
+    return;
+  }
+
+  // Check if the issue is actually a PR
+  if (!issue.pull_request) {
+    return;
+  }
+
+  console.log("octokit.user: ", context.octokit.rest.pulls);
+  // Fetch PR details to check if it was created by the bot
+  const pr = await context.octokit.rest.pulls.get({
+    owner: repository.owner.login,
+    repo: repository.name,
+    pull_number: issue.number,
+  });
+
+  if (pr.data.user.type === "Bot" || pr.data.user.type === "bot") {
+    console.log(
+      "Comment detected on a bot-created PR, calling handleBotPRComment..."
+    );
+    await handleBotPRComment({
+      octokit: context.octokit,
+      payload: context.payload,
+    });
+  }
+});
 
 app.webhooks.onError((error) => {
   if (error.name === "AggregateError") {
