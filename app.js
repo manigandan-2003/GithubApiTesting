@@ -260,91 +260,163 @@ async function run(chunks) {
 
 // Function to determine how much context is needed
 
-function decideContextSize(
-  avgDistance,
-  matchedKeywords,
-  maxPossibleResults = 10
-) {
-  // Decay exponent controls how fast context shrinks as avgDistance increases.
-  const decayExponent = 3.5;
-  // A modest boost per keyword to slightly increase context when matches exist.
-  const keywordBoost = 0.2;
+// function decideContextSize(
+//   avgDistance,
+//   matchedKeywords,
+//   maxPossibleResults = 10
+// ) {
+//   // Decay exponent controls how fast context shrinks as avgDistance increases.
+//   const decayExponent = 3.5;
+//   // A modest boost per keyword to slightly increase context when matches exist.
+//   const keywordBoost = 0.2;
 
-  // Compute a base size that decreases with higher avgDistance.
-  let baseSize = maxPossibleResults / Math.pow(avgDistance, decayExponent);
-  // Add a bonus based on matched keywords.
-  let dynamicContextSize = baseSize + matchedKeywords * keywordBoost;
+//   // Compute a base size that decreases with higher avgDistance.
+//   let baseSize = maxPossibleResults / Math.pow(avgDistance, decayExponent);
+//   // Add a bonus based on matched keywords.
+//   let dynamicContextSize = baseSize + matchedKeywords * keywordBoost;
 
-  // Round and ensure the result is between 1 and maxPossibleResults.
-  return Math.max(
-    1,
-    Math.min(Math.round(dynamicContextSize), maxPossibleResults)
-  );
-}
+//   // Round and ensure the result is between 1 and maxPossibleResults.
+//   return Math.max(
+//     1,
+//     Math.min(Math.round(dynamicContextSize), maxPossibleResults)
+//   );
+// }
 
-// Function to check if issue mentions existing keywords in retrieved code
-function checkKeywordOverlap(issueBody, documents) {
-  let issueWords = new Set(issueBody.toLowerCase().split(/\W+/));
-  let matchedKeywords = 0;
+// // Function to check if issue mentions existing keywords in retrieved code
+// function checkKeywordOverlap(issueBody, documents) {
+//   let issueWords = new Set(issueBody.toLowerCase().split(/\W+/));
+//   let matchedKeywords = 0;
 
-  for (let doc of documents) {
-    let docWords = new Set(doc.toLowerCase().split(/\W+/));
-    for (let word of issueWords) {
-      if (docWords.has(word)) {
-        matchedKeywords++;
-      }
-    }
-  }
-  return matchedKeywords;
-}
+//   for (let doc of documents) {
+//     let docWords = new Set(doc.toLowerCase().split(/\W+/));
+//     for (let word of issueWords) {
+//       if (docWords.has(word)) {
+//         matchedKeywords++;
+//       }
+//     }
+//   }
+//   return matchedKeywords;
+// }
 
-// Rough estimation of tokens in a document
-function estimateTokens(text) {
-  return Math.ceil(text.split(/\s+/).length * 1.5);
-}
+// // Rough estimation of tokens in a document
+// function estimateTokens(text) {
+//   return Math.ceil(text.split(/\s+/).length * 1.5);
+// }
 
-async function query(issueBody, maxTokens = 4096, bufferTokens = 1000) {
+// async function query(issueBody, maxTokens = 4096, bufferTokens = 1000) {
+//   const collection = await client.getOrCreateCollection({
+//     name: "my_collection",
+//   });
+
+//   let initialResults = await collection.query({
+//     queryTexts: [issueBody],
+//     nResults: 10, // Fetch more initially to analyze relevance
+//   });
+
+//   let relevantDocuments = [];
+//   let totalTokens = 0;
+//   let avgDistance = 0;
+
+//   if (initialResults.distances[0]) {
+//     avgDistance =
+//       initialResults.distances[0].reduce((a, b) => a + b, 0) /
+//       initialResults.distances[0].length;
+//   }
+
+//   let matchedKeywords = checkKeywordOverlap(
+//     issueBody,
+//     initialResults.documents[0]
+//   );
+
+//   let nResults = decideContextSize(avgDistance, matchedKeywords);
+//   console.log("Number of results to fetch:", nResults);
+
+//   let finalResults = await collection.query({
+//     queryTexts: [issueBody],
+//     nResults: nResults,
+//   });
+
+//   for (let doc of finalResults.documents[0]) {
+//     let docTokens = estimateTokens(doc);
+//     if (totalTokens + docTokens > maxTokens - bufferTokens) break;
+//     totalTokens += docTokens;
+//     relevantDocuments.push(doc);
+//   }
+
+//   console.log("Final context selected:", relevantDocuments);
+//   return relevantDocuments;
+// }
+
+async function query(issueBody) {
   const collection = await client.getOrCreateCollection({
     name: "my_collection",
   });
 
-  let initialResults = await collection.query({
+  // Retrieve a generous candidate set.
+  const candidateResults = await collection.query({
     queryTexts: [issueBody],
-    nResults: 10, // Fetch more initially to analyze relevance
+    nResults: 10, // Retrieve more candidates than you might need.
   });
 
-  let relevantDocuments = [];
-  let totalTokens = 0;
-  let avgDistance = 0;
+  // Dynamically select the best context chunks.
+  const selectedChunks = selectContextChunks(candidateResults.documents, 1, 10);
 
-  if (initialResults.distances[0]) {
-    avgDistance =
-      initialResults.distances[0].reduce((a, b) => a + b, 0) /
-      initialResults.distances[0].length;
+  console.log("No of Selected Context Chunks:", selectedChunks[0].length);
+  return selectedChunks;
+}
+
+// Compute a dynamic threshold using both median and percentile logic.
+function computeDynamicThreshold(scores) {
+  if (scores.length === 0) return 0;
+
+  // Sort scores in ascending order.
+  const sorted = [...scores].sort((a, b) => a - b);
+
+  // Compute median.
+  const mid = Math.floor(sorted.length / 2);
+  const medianScore =
+    sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+
+  // Compute approximate 60th percentile.
+  const percentileIndex = Math.floor(0.6 * sorted.length);
+  const percentileScore = sorted[percentileIndex];
+
+  // Use a stricter cutoff: choose the higher value.
+  return Math.max(medianScore, percentileScore);
+}
+
+// Select context chunks based on dynamic thresholding and similarity spread.
+function selectContextChunks(documents, minChunks = 1, maxChunks = 10) {
+  if (!documents || documents.length === 0) return [];
+
+  // Sort documents by descending score.
+  const sortedDocs = documents.sort((a, b) => b.score - a.score);
+
+  // Extract scores.
+  const scores = sortedDocs.map((doc) => doc.score);
+  const maxScore = scores[0];
+  const minScore = scores[scores.length - 1];
+  const epsilon = 0.01; // If the spread is less than epsilon, consider them similar.
+
+  // If all scores are almost identical, return only the minimum number of chunks.
+  if (maxScore - minScore < epsilon) {
+    return sortedDocs.slice(0, minChunks);
   }
 
-  let matchedKeywords = checkKeywordOverlap(
-    issueBody,
-    initialResults.documents[0]
-  );
+  // Otherwise, compute the dynamic threshold.
+  const threshold = computeDynamicThreshold(scores);
 
-  let nResults = decideContextSize(avgDistance, matchedKeywords);
-  console.log("Number of results to fetch:", nResults);
+  // Filter out documents with scores below the threshold.
+  let selected = sortedDocs.filter((doc) => doc.score >= threshold);
 
-  let finalResults = await collection.query({
-    queryTexts: [issueBody],
-    nResults: nResults,
-  });
-
-  for (let doc of finalResults.documents[0]) {
-    let docTokens = estimateTokens(doc);
-    if (totalTokens + docTokens > maxTokens - bufferTokens) break;
-    totalTokens += docTokens;
-    relevantDocuments.push(doc);
+  // Enforce minimum and maximum limits.
+  if (selected.length < minChunks) {
+    selected = sortedDocs.slice(0, minChunks); // Ensure at least minChunks.
+  } else if (selected.length > maxChunks) {
+    selected = selected.slice(0, maxChunks); // Cap at maxChunks.
   }
 
-  console.log("Final context selected:", relevantDocuments);
-  return relevantDocuments;
+  return selected;
 }
 
 function extractJson(text) {
@@ -371,9 +443,13 @@ async function generateFix(issueBody, context = "", feedback = "") {
   Fix the following issue by modifying necessary files, adding new files if required, or appending new code where appropriate. 
   Do not remove or overwrite any existing working code that may be used elsewhere, but you may add to it. 
   If a file contains working code, preserve it and add the new functionality in a way that integrates with the existing code.
+  *THINK STEP BY STEP BEFORE YOU COME UP WITH THE SOLUTION* : Do not delete or add lines of code or text without a good reason.
+  *STRICTLY CROSS CHECK AND BACKTRACK IF NEEDED* : Make sure that the code or text you are adding/deleting/modifying is correct and, does not change the intended behaviour of the code or text, strictly as specifyed by the issue.
+  For eg: if the issue states renaming A.txt to B.txt, step 1: create a new file with the name B.txt, step 2: copy contents from C.txt, Step 3: Oh, we need to copy from B.txt not C.txt, so backtrack and copy from B.txt, step 4: delete A.txt. Generalize this thinking for all the issues.
   Make your code clean, modular, and structured.
   If there is any feedback, write your code according to the feedback.
   Use only the relevant context and ignore unnecessary information.
+  If the file needs to be deleted, content must be empty.
   The output should strictly follow the format of a JSON object {filepath1: content1, filepath2: content2, ...} without being wrapped in backticks.
   Issue: ${issueBody}
   Feedback: ${feedback}  
@@ -455,6 +531,17 @@ async function createPR(octokit, payload, fix) {
             }
           );
           console.log(`Existing file SHA for ${filePath}:`, fileData.sha);
+
+          // If file content is null or empty, mark it for deletion
+          if (!fileContent) {
+            console.log(`Marking ${filePath} for deletion.`);
+            return {
+              path: filePath,
+              mode: "100644",
+              type: "blob",
+              sha: null, // Deleting the file
+            };
+          }
 
           return {
             path: filePath,
@@ -592,41 +679,180 @@ async function handleIssueOpened({ octokit, payload }, reply = "") {
   }
 }
 
-async function generateResponse(commentText) {
+// async function generateResponse(commentText) {
+//   const genAI = new GoogleGenerativeAI(geminiApiKey);
+//   const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+//   const prompt = `You are assigned a job to come up with the response to a comment on a PR.
+//   If the comment does not require a response, then label must be 0, reply must be "".
+//   If the comment requires a response to the comment but no change in the code is required, then label must be 1 and reply must have an approriate response to the comment text.
+//   If the comment does not require a response and the issue is not resolved or any change in the code is suggested, then label must be 2 and reply must be "".
+//   If the comment requires a response and the issue is not resolved or any change in the code is suggested, then label must be 3 and reply must have an approriate comment.
+//   The output should strictly follow the format, where 1st line is the label (0, 1 , 2 or 3) and 2nd line is the reply.
+//   Comment: ${commentText}`;
+
+//   console.log("generateResponse prompt:", prompt);
+//   try {
+//     const result = await model.generateContent(prompt);
+//     const processedresult = result.response.text().split("\n");
+//     console.log("Generated response:", processedresult);
+//     return processedresult;
+//   } catch (error) {
+//     console.error("Error generating response:", error);
+//     return [];
+//   }
+// }
+
+async function generateResponse(commentText, conversationHistory, codeDiff) {
   const genAI = new GoogleGenerativeAI(geminiApiKey);
   const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-  const prompt = `You are assigned a job to come up with the response to a comment on a PR.
-  If the comment does not require a response, then label must be 0, reply must be "".
-  If the comment requires a response to the comment but no change in the code is required, then label must be 1 and reply must have an approriate comment.
-  If the comment does not require a response and the issue is not resolved or any change in the code is suggested, then label must be 2 and reply must be "".
-  If the comment requires a response and the issue is not resolved or any change in the code is suggested, then label must be 3 and reply must have an approriate comment.
-  The output should strictly follow the format, where 1st line is the label (0, 1 , 2 or 3) and 2nd line is the reply.
-  Comment: ${commentText}`;
+  // Format conversation history
+  const formattedHistory = conversationHistory
+    .map(
+      (comment, index) =>
+        `Comment ${index + 1} by ${comment.user} at ${comment.created_at}: ${
+          comment.body
+        }`
+    )
+    .join("\n");
+
+  // Format code diff
+  const formattedDiff = codeDiff
+    .map((file) => `File: ${file.filename}\nChanges:\n${file.changes}`)
+    .join("\n\n");
+
+  const prompt = `You are assigned a job to come up with a response to a comment on a PR.
+
+  Below is the PR conversation history:
+  ${formattedHistory}
+
+  Below are the code changes (diffs):
+  ${formattedDiff}
+
+  You will receive a new comment at the end of this conversation. Based on the context, generate an appropriate response.
+
+  Rules:
+  - If the comment does not require a response, then label must be 0, reply must be "".
+  - If the comment requires a response but no code change is needed, then label must be 1 and reply must have an appropriate response.
+  - If the comment does not require a response but suggests a code change, then label must be 2 and reply must be "".
+  - If the comment requires a response and suggests a code change, then label must be 3 and reply must have an appropriate response.
+
+  The output should strictly follow this format:
+  - The first line is the label (0, 1, 2, or 3).
+  - The second line is the reply (if applicable).
+
+  New Comment: ${commentText}`;
 
   console.log("generateResponse prompt:", prompt);
   try {
     const result = await model.generateContent(prompt);
-    const processedresult = result.response.text().split("\n");
-    console.log("Generated response:", processedresult);
-    return processedresult;
+    const processedResult = [
+      result.response.text().split("\n")[0],
+      result.response.text().split("\n").slice(1).join("\n"),
+    ];
+    console.log("Generated response:", processedResult);
+    return processedResult;
   } catch (error) {
     console.error("Error generating response:", error);
     return [];
   }
 }
 
+// async function handleBotPRComment({ octokit, payload }) {
+//   const commentText = payload.comment.body;
+//   try {
+//     const response = await generateResponse(commentText);
+//     if (response[0] == "1" || response[0] == "3") {
+//       await octokit.request(
+//         "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+//         {
+//           owner: payload.repository.owner.login,
+//           repo: payload.repository.name,
+//           issue_number: payload.issue.number,
+//           body: response[1],
+//           headers: {
+//             "x-github-api-version": "2022-11-28",
+//           },
+//         }
+//       );
+//     }
+//     if (response[0] == "2" || response[0] == "3") {
+//       await handleIssueOpened({ octokit, payload }, commentText);
+//     }
+//   } catch (error) {
+//     console.error("Error handling bot PR comment:", error);
+//     if (error.response) {
+//       console.error(
+//         `Status: ${error.response.status}, Message: ${JSON.stringify(
+//           error.response.data
+//         )}`
+//       );
+//     }
+//   }
+// }
+
 async function handleBotPRComment({ octokit, payload }) {
   const commentText = payload.comment.body;
+  const owner = payload.repository.owner.login;
+  const repo = payload.repository.name;
+  const issue_number = payload.issue.number; // PRs are also treated as issues
+  const pull_number = issue_number; // Since PRs are issues, we can use the same number
+
   try {
-    const response = await generateResponse(commentText);
+    // Fetch all comments in the PR conversation
+    const { data: comments } = await octokit.request(
+      "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
+      {
+        owner,
+        repo,
+        issue_number,
+        headers: {
+          "x-github-api-version": "2022-11-28",
+        },
+      }
+    );
+
+    // Extract relevant text from comments
+    const conversationHistory = comments.map((comment) => ({
+      user: comment.user.login,
+      body: comment.body,
+      created_at: comment.created_at,
+    }));
+
+    // Fetch code diff for the PR
+    const { data: prFiles } = await octokit.request(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
+      {
+        owner,
+        repo,
+        pull_number,
+        headers: {
+          "x-github-api-version": "2022-11-28",
+        },
+      }
+    );
+
+    // Extract changed files and diffs
+    const codeDiff = prFiles.map((file) => ({
+      filename: file.filename,
+      changes: file.patch, // This contains the actual code diff
+    }));
+
+    // Pass conversation history and code diff to generateResponse
+    const response = await generateResponse(
+      commentText,
+      conversationHistory,
+      codeDiff
+    );
+
     if (response[0] == "1" || response[0] == "3") {
       await octokit.request(
         "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
         {
-          owner: payload.repository.owner.login,
-          repo: payload.repository.name,
-          issue_number: payload.issue.number,
+          owner,
+          repo,
+          issue_number,
           body: response[1],
           headers: {
             "x-github-api-version": "2022-11-28",
@@ -634,8 +860,12 @@ async function handleBotPRComment({ octokit, payload }) {
         }
       );
     }
+
     if (response[0] == "2" || response[0] == "3") {
-      await handleIssueOpened({ octokit, payload }, commentText);
+      await handleIssueOpened(
+        { octokit, payload, conversationHistory, codeDiff },
+        commentText
+      );
     }
   } catch (error) {
     console.error("Error handling bot PR comment:", error);
@@ -649,18 +879,28 @@ async function handleBotPRComment({ octokit, payload }) {
   }
 }
 
-app.webhooks.on(
-  ["issues.opened", "issues.edited", "issues.reopened"],
-  async (context) => {
-    const issue = context.payload.issue;
-    const labels = issue.labels.map((label) => label.name);
+// app.webhooks.on(
+//   ["issues.opened", "issues.edited", "issues.reopened"],
+//   async (context) => {
+//     const issue = context.payload.issue;
+//     const labels = issue.labels.map((label) => label.name);
 
-    if (labels.includes("RepoBot")) {
-      console.log("Bot label detected, calling handleIssueOpened...");
-      await handleIssueOpened(context);
-    }
+//     if (labels.includes("RepoBot")) {
+//       console.log("Bot label detected, calling handleIssueOpened...");
+//       await handleIssueOpened(context);
+//     }
+//   }
+// );
+
+app.webhooks.on(["issues.reopened", "issues.labeled"], async (context) => {
+  const issue = context.payload.issue;
+  const labels = issue.labels ? issue.labels.map((label) => label.name) : []; // Prevent undefined error
+
+  if (labels.includes("RepoBot")) {
+    console.log("Bot label detected, calling handleIssueOpened...");
+    await handleIssueOpened(context);
   }
-);
+});
 
 app.webhooks.on("issue_comment.created", async (context) => {
   const comment = context.payload.comment;
