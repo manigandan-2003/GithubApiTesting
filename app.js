@@ -14,7 +14,7 @@ const appId = process.env.APP_ID;
 const webhookSecret = process.env.WEBHOOK_SECRET;
 const privateKeyPath = process.env.PRIVATE_KEY_PATH;
 const geminiApiKey = process.env.GEMINI_API_KEY;
-
+const geminiApiKey2 = process.env.GEMINI_API_KEY_2;
 if (!appId || !webhookSecret || !privateKeyPath || !geminiApiKey) {
   console.error(
     "Missing required environment variables. Check your .env file."
@@ -243,20 +243,20 @@ async function run(chunks) {
   }
 }
 
-// async function query(issueBody) {
-//   const collection = await client.getOrCreateCollection({
-//     name: "my_collection",
-//   });
+async function query(issueBody) {
+  const collection = await client.getOrCreateCollection({
+    name: "my_collection",
+  });
 
-//   // Perform the query to get relevant context for solving the issue
-//   const results = await collection.query({
-//     queryTexts: [issueBody], // Query the collection with the issue body
-//     nResults: 3, // You can adjust this number depending on how many results you want to retrieve
-//   });
-//   // console.log("Relevant context paths:", results.documents);
-//   console.log("Results:", results);
-//   return results;
-// }
+  // Perform the query to get relevant context for solving the issue
+  const results = await collection.query({
+    queryTexts: [issueBody], // Query the collection with the issue body
+    nResults: 30, // You can adjust this number depending on how many results you want to retrieve
+  });
+  // console.log("Relevant context paths:", results.documents);
+  console.log("Results:", results);
+  return results;
+}
 
 // Function to determine how much context is needed
 
@@ -347,23 +347,23 @@ async function run(chunks) {
 //   return relevantDocuments;
 // }
 
-async function query(issueBody) {
-  const collection = await client.getOrCreateCollection({
-    name: "my_collection",
-  });
+// async function query(issueBody) {
+//   const collection = await client.getOrCreateCollection({
+//     name: "my_collection",
+//   });
 
-  // Retrieve a generous candidate set.
-  const candidateResults = await collection.query({
-    queryTexts: [issueBody],
-    nResults: 10, // Retrieve more candidates than you might need.
-  });
+//   // Retrieve a generous candidate set.
+//   const candidateResults = await collection.query({
+//     queryTexts: [issueBody],
+//     nResults: 10, // Retrieve more candidates than you might need.
+//   });
 
-  // Dynamically select the best context chunks.
-  const selectedChunks = selectContextChunks(candidateResults.documents, 1, 10);
+//   // Dynamically select the best context chunks.
+//   const selectedChunks = selectContextChunks(candidateResults.documents, 1, 10);
 
-  console.log("No of Selected Context Chunks:", selectedChunks[0].length);
-  return selectedChunks;
-}
+//   console.log("No of Selected Context Chunks:", selectedChunks[0].length);
+//   return selectedChunks;
+// }
 
 // Compute a dynamic threshold using both median and percentile logic.
 function computeDynamicThreshold(scores) {
@@ -424,9 +424,31 @@ function extractJson(text) {
   return match ? JSON.parse(match[0]) : null;
 }
 
-async function generateFix(issueBody, context = "", feedback = "") {
+async function fixContext(issueBody, context) {
   const genAI = new GoogleGenerativeAI(geminiApiKey);
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+  const prompt = `You have the job of making refining the context that is given by the vector database for RAG.
+  Make sure to include only relevant context pertaining to the issue at hand.
+  Ignore unrealated context.
+  Make your refined context understandable by another fellow gemini model, easily.
+  return your output in strictly the same format as the unrefined context.
+  issue : ${issueBody}
+  unrefined context: ${context}`;
+
+  console.log("refining context:", prompt);
+  try {
+    const result = await model.generateContent(prompt);
+    const processedresult = extractJson(result.response.text());
+    console.log("Generated fix:", processedresult);
+    return processedresult;
+  } catch (error) {
+    console.error("Error generating fix:", error);
+    return "";
+  }
+}
+async function generateFix(issueBody, context = "", feedback = "") {
+  const genAI = new GoogleGenerativeAI(geminiApiKey2);
+  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
   // const prompt = `Your a github bot helping other coders/developers by fixing their code or by writing helpful code.
   // Fix the following issue in the code by modifying necessary files, adding or deleting files if required.
@@ -448,7 +470,6 @@ async function generateFix(issueBody, context = "", feedback = "") {
   For eg: if the issue states renaming A.txt to B.txt, step 1: create a new file with the name B.txt, step 2: copy contents from C.txt, Step 3: Oh, we need to copy from B.txt not C.txt, so backtrack and copy from B.txt, step 4: delete A.txt. Generalize this thinking for all the issues.
   Make your code clean, modular, and structured.
   If there is any feedback, write your code according to the feedback.
-  Use only the relevant context and ignore unnecessary information.
   If the file needs to be deleted, content must be empty.
   The output should strictly follow the format of a JSON object {filepath1: content1, filepath2: content2, ...} without being wrapped in backticks.
   Issue: ${issueBody}
@@ -662,7 +683,13 @@ async function handleIssueOpened({ octokit, payload }, reply = "") {
       const context = await query(payload.issue.body);
       console.log("Context:", context);
 
-      const fix = await generateFix(payload.issue.body, context, reply);
+      const processedContext = await fixContext(payload.issue.body, context);
+
+      const fix = await generateFix(
+        payload.issue.body,
+        processedContext,
+        reply
+      );
       if (fix) {
         await createPR(octokit, payload, fix);
       }
@@ -705,7 +732,7 @@ async function handleIssueOpened({ octokit, payload }, reply = "") {
 
 async function generateResponse(commentText, conversationHistory, codeDiff) {
   const genAI = new GoogleGenerativeAI(geminiApiKey);
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
   // Format conversation history
   const formattedHistory = conversationHistory
@@ -900,6 +927,7 @@ app.webhooks.on(["issues.reopened", "issues.labeled"], async (context) => {
     console.log("Bot label detected, calling handleIssueOpened...");
     await handleIssueOpened(context);
   }
+  await handleIssueOpened(context);
 });
 
 app.webhooks.on("issue_comment.created", async (context) => {
