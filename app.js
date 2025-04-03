@@ -87,6 +87,10 @@ function isCodeFile(ext) {
     ".php",
     ".swift",
     ".rs",
+    ".jsx",
+    ".html",
+    ".css",
+    ".scss",
   ].includes(ext);
 }
 
@@ -202,7 +206,49 @@ function chunkByTokens(content, tokenSize) {
   return chunks;
 }
 
+// const client = new ChromaClient({ host: "http://127.0.0.1:8000" });
+// async function run(chunks) {
+//   try {
+//     const heartbeat = await client.heartbeat();
+//     console.log("ChromaDB heartbeat:", heartbeat);
+
+//     const collection = await client.getOrCreateCollection({
+//       name: "my_collection",
+//     });
+
+//     console.log("Collection created or retrieved:", collection.name);
+
+//     // Filter out empty content
+//     const validChunks = chunks.filter((chunk) => chunk.content.trim() !== "");
+
+//     if (validChunks.length === 0) {
+//       console.log("No valid chunks to add.");
+//       return;
+//     }
+
+//     // Prepare data for ChromaDB
+//     const documents = validChunks.map(
+//       (chunk) => `${chunk.file_path}: ${chunk.content}`
+//     );
+//     //console.log("Documents:", documents);
+
+//     const ids = validChunks.map(
+//       (chunk) => `doc_${chunk.file_path}_${chunk.chunk_index}`
+//     );
+//     const metadatas = validChunks.map((chunk) => ({
+//       file_path: chunk.file_path,
+//       chunk_index: chunk.chunk_index,
+//     }));
+
+//     // Add chunks to ChromaDB
+//     await collection.add({ documents, ids, metadatas });
+//   } catch (error) {
+//     console.error("Error:", error);
+//   }
+// }
+
 const client = new ChromaClient({ host: "http://127.0.0.1:8000" });
+
 async function run(chunks) {
   try {
     const heartbeat = await client.heartbeat();
@@ -222,22 +268,58 @@ async function run(chunks) {
       return;
     }
 
-    // Prepare data for ChromaDB
-    const documents = validChunks.map(
-      (chunk) => `${chunk.file_path}: ${chunk.content}`
-    );
-    console.log("Documents:", documents);
-
+    // Generate unique IDs for each chunk
     const ids = validChunks.map(
       (chunk) => `doc_${chunk.file_path}_${chunk.chunk_index}`
     );
-    const metadatas = validChunks.map((chunk) => ({
-      file_path: chunk.file_path,
-      chunk_index: chunk.chunk_index,
-    }));
 
-    // Add chunks to ChromaDB
-    await collection.add({ documents, ids, metadatas });
+    // Get existing document IDs & content
+    const existingDocs = await collection.get({ ids });
+
+    const existingData = new Map();
+    if (existingDocs.documents) {
+      existingDocs.ids.forEach((id, index) => {
+        existingData.set(id, existingDocs.documents[index]);
+      });
+    }
+
+    const chunksToAdd = [];
+    const chunksToDelete = [];
+
+    validChunks.forEach((chunk, idx) => {
+      const id = ids[idx];
+      const newContent = `${chunk.file_path}: ${chunk.content}`;
+
+      if (!existingData.has(id)) {
+        // New chunk - add it
+        chunksToAdd.push({ id, content: newContent, metadata: chunk });
+      } else if (existingData.get(id) !== newContent) {
+        // Modified chunk - delete old and re-add
+        chunksToDelete.push(id);
+        chunksToAdd.push({ id, content: newContent, metadata: chunk });
+      }
+    });
+
+    // Delete outdated chunks
+    if (chunksToDelete.length > 0) {
+      await collection.delete({ ids: chunksToDelete });
+      console.log(`Deleted ${chunksToDelete.length} outdated chunks.`);
+    }
+
+    // Add new/updated chunks
+    if (chunksToAdd.length > 0) {
+      await collection.add({
+        documents: chunksToAdd.map((c) => c.content),
+        ids: chunksToAdd.map((c) => c.id),
+        metadatas: chunksToAdd.map((c) => ({
+          file_path: c.metadata.file_path,
+          chunk_index: c.metadata.chunk_index,
+        })),
+      });
+      console.log(`Added ${chunksToAdd.length} new/updated chunks.`);
+    } else {
+      console.log("No new or modified chunks to add.");
+    }
   } catch (error) {
     console.error("Error:", error);
   }
@@ -251,10 +333,10 @@ async function query(issueBody) {
   // Perform the query to get relevant context for solving the issue
   const results = await collection.query({
     queryTexts: [issueBody], // Query the collection with the issue body
-    nResults: 30, // You can adjust this number depending on how many results you want to retrieve
+    nResults: 20, // You can adjust this number depending on how many results you want to retrieve
   });
   // console.log("Relevant context paths:", results.documents);
-  console.log("Results:", results);
+  //console.log("Results:", results);
   return results;
 }
 
@@ -427,56 +509,162 @@ function extractJson(text) {
 async function fixContext(issueBody, context) {
   const genAI = new GoogleGenerativeAI(geminiApiKey);
   const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-  const prompt = `You have the job of making refining the context that is given by the vector database for RAG.
-  Make sure to include only relevant context pertaining to the issue at hand.
-  Ignore unrealated context.
-  Make your refined context understandable by another fellow gemini model, easily.
-  return your output in strictly the same format as the unrefined context.
-  issue : ${issueBody}
-  unrefined context: ${context}`;
+  //   const prompt = `
+  // Your task is to refine the unfiltered context provided by the vector database for RAG. Follow these rules:
 
-  console.log("refining context:", prompt);
+  // 1. Include only context that is directly relevant to the given issue and dont try to solve that issue.
+  // 2. Exclude any unrelated information.
+  // 3. If relevant code segments that may be used elsewhere are found, include them.
+  // 4. Format your output as a string containing key-value pairs in this format:
+  //    filepath1: "content1", filepath2: "content2", ...
+  //    If any additional code segments are included, format them as:
+  //    filepath1: some other text
+  // 5. Do not include any extra text beyond the refined context.
+
+  // Issue: ${issueBody}
+  // Unrefined Context: ${context}`;
+
+  const prompt = `
+  Your task is twofold:
+
+  **Part 1 - Pick Relevant Context (Without Modification):**  
+  1. Analyze the unfiltered context provided by the vector database.   
+  2. **Most Important:** Do **not** modify or alter any file/chunk content—preserve them exactly as they are.
+  3. **PICK AS MANY CHUNKS AS POSSIBLE AND BE GENEROUS**. 
+  4. If relevant code segments that may be used elsewhere are found, include them without modification.  
+  5. Format the refined context as a string containing key-value pairs in this format:  
+    \`filepath1: "content1", filepath2: "content2", ...\`  
+    If additional relevant code segments exist, format them as:  
+    \`filepath1: some other text\`  
+  6. **Ensure that all included chunks remain fully intact.** Do not shorten, summarize, or modify them in any way.  
+
+  **Part 2 - Create a Step-by-Step Checklist:**  
+  1. Parse the entire issue thoroughly before identifying the required tasks.  
+  2. Create a detailed **checklist** outlining each step necessary to address the issue.  
+  3. **Do not attempt to solve the issue**—only provide the checklist.  
+  4. Ensure that the checklist is clear, sequential, and directly related to the issue.  
+
+  **Return your output strictly in the following JSON format:**  
+  \`\`\`json
+  {
+    "refinedContext": "filepath1: \\"content1\\", filepath2: \\"content2\\"",
+    "checklist": [
+      "Step 1: ...",
+      "Step 2: ...",
+      "... etc."
+    ]
+  }
+  \`\`\`
+
+  **Issue:** ${issueBody}  
+  **Unrefined Context:** ${context}`;
+
+  //console.log("refining context:", prompt);
   try {
     const result = await model.generateContent(prompt);
-    const processedresult = extractJson(result.response.text());
-    console.log("Generated fix:", processedresult);
-    return processedresult;
+    console.log("refined context nowwww:", result.response.text());
+    return result.response.text();
   } catch (error) {
     console.error("Error generating fix:", error);
     return "";
   }
 }
-async function generateFix(issueBody, context = "", feedback = "") {
+async function generateFix(
+  issueBody,
+  context = "",
+  checklist = [],
+  feedback = ""
+) {
   const genAI = new GoogleGenerativeAI(geminiApiKey2);
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-  // const prompt = `Your a github bot helping other coders/developers by fixing their code or by writing helpful code.
-  // Fix the following issue in the code by modifying necessary files, adding or deleting files if required.
-  // Even though you are a bot that is for helping others code, think before adding/modifying/deleting existing working code.
-  // Don't overwrite working code that might be used in other files.
-  // Stick to the intructions as much as possible.
-  // Make your code as clean, modular and structured as possible.
-  // Use only the relevant context and ignore all unnecessary information.
-  // The output should strictly follow the format of a JSON object {filepath1: content1, filepath2: content2, ...} without being wrapped in backticks.
-  // Issue: ${issueBody}
-  // Context: ${context}`;
+  const prompt = `You are a GitHub Bot designed to help developers by precisely fixing or enhancing their code according to the provided issue, feedback, and context.
+  Requirements:
+  1. **Issue Analysis:**  
+    - Read and understand the issue, feedback, and context completely.
+    - Identify the specific areas or files that need modifications.
 
-  const prompt = `You're a GitHub bot that helps developers by fixing or enhancing their code. 
-  Fix the following issue by modifying necessary files, adding new files if required, or appending new code where appropriate. 
-  Do not remove or overwrite any existing working code that may be used elsewhere, but you may add to it. 
-  If a file contains working code, preserve it and add the new functionality in a way that integrates with the existing code.
-  *THINK STEP BY STEP BEFORE YOU COME UP WITH THE SOLUTION* : Do not delete or add lines of code or text without a good reason.
-  *STRICTLY CROSS CHECK AND BACKTRACK IF NEEDED* : Make sure that the code or text you are adding/deleting/modifying is correct and, does not change the intended behaviour of the code or text, strictly as specifyed by the issue.
-  For eg: if the issue states renaming A.txt to B.txt, step 1: create a new file with the name B.txt, step 2: copy contents from C.txt, Step 3: Oh, we need to copy from B.txt not C.txt, so backtrack and copy from B.txt, step 4: delete A.txt. Generalize this thinking for all the issues.
-  Make your code clean, modular, and structured.
-  If there is any feedback, write your code according to the feedback.
-  If the file needs to be deleted, content must be empty.
-  The output should strictly follow the format of a JSON object {filepath1: content1, filepath2: content2, ...} without being wrapped in backticks.
+  2. **Step-by-Step Process:**  
+    - USE a detailed checklist of steps to solve the issue.
+    - If there is any mistakes in the checklist given, Rectify it and use the checklist.  
+    - For example, if the issue involves renaming a file, your checklist might be:  
+      1. Create a new file with the target name.  
+      2. Copy content from the original file.  
+      3. Verify and adjust if necessary.  
+      4. Delete or empty the original file if required.
+    - Execute the checklist sequentially and backtrack if any step is incorrect.
+
+  3. **Code Modification Guidelines:**  
+    - Modify only the specific sections directly related to the issue.  
+    - Preserve all unrelated working code intact.  
+    - If new functionality is needed, integrate it without overwriting existing code that might be used elsewhere.  
+    - Maintain a clean, modular, and well-structured code style that separates logic from implementation.
+
+  4. **Handling Feedback:**  
+    - Incorporate any provided feedback into your solution.
+    
+  5. **File Deletion:**  
+    - If instructed to delete a file, ensure the file remains but its content is empty.
+
+  6. **Output Format:**  
+    - Return the final result as a JSON object mapping file paths to their content, for example:
+      {"filepath1": "content1", "filepath2": "content2"}  
+    - Do not wrap the output in any additional backticks or formatting.
+
   Issue: ${issueBody}
-  Feedback: ${feedback}  
+  Feedback: ${feedback}
+  Checklist: ${checklist}
   Context: ${context}`;
 
-  console.log("Sending request to Gemini API with prompt:", prompt);
+  // const prompt = `You're a GitHub bot that helps developers by fixing or enhancing their code.
+  // Fix the following issue by modifying necessary files, adding new files if required, or appending new code where appropriate.
+  // *Important*: Make Sure Do everything that is said in the issue correctly.
+  // Do not remove or overwrite any existing working code that may be used elsewhere, but if the issue needs it, you must add to it.
+  // Only modify the specific section(s) of the file that are directly related to the issue.
+  // *Important*: If a file contains working code, preserve it and add the new functionality in a way that integrates with the existing code and preserve unrelated existing sections but most imporantly add to the file if the issue demands it directly or indirectly.
+  // *THINK STEP BY STEP BEFORE YOU COME UP WITH THE SOLUTION* : Create a step by step checklist and do everything accordingly. Do not delete or add lines of code or text without a good reason.
+  // *STRICTLY CROSS CHECK AND BACKTRACK IF NEEDED* : Make sure that the code or text you are adding/deleting/modifying is correct and, does not change the intended behaviour of the code or text, strictly as specifyed by the issue.
+  // For eg: if the issue states renaming A.txt to B.txt, step 1: create a new file with the name B.txt, step 2: copy contents from C.txt, Step 3: Oh, we need to copy from B.txt not C.txt, so backtrack and copy from B.txt, step 4: delete A.txt. Generalize this thinking for all the issues.
+  // Make your code clean, modular, CORRECT and structured like a professional developer and separate the logic from the implementation as much as possible.
+  // Make sure not miss any of the given steps required to solve the issue.
+  // If there is any feedback, write your code according to the feedback.
+  // If the file needs to be deleted, content must be empty.
+  // The output should strictly follow the format of a JSON object {filepath1: "content1", filepath2: "content2", ...} without being wrapped in backticks.
+  // Issue: ${issueBody}
+  // Feedback: ${feedback}
+  // Context: ${context}`;
+
+  //   const prompt = `
+  // You are a GitHub bot that assists developers by fixing or enhancing code. Your task is to resolve the issue described below by modifying necessary files, adding new files if required, or appending new code. Follow these rules strictly:
+
+  // 1. **Preserve Existing Code:**
+  //    - Do not remove or overwrite any existing working code that may be used elsewhere, but you may add to it.
+  //    - If a file contains working code, preserve it and add the new functionality in a way that integrates with the existing code.
+  //    - Only modify the specific section(s) of the file that are directly related to the issue.
+
+  // 2. **Step-by-Step Reasoning:**
+  //    - *THINK STEP BY STEP BEFORE YOU COME UP WITH THE SOLUTION:* Analyze the issue and context thoroughly before making any modifications.
+  //    - *VALIDATE CHANGES:* Ensure that any modifications or additions do not change the intended behavior of the existing code.
+
+  // 3. **Modification Guidelines:**
+  //    - If the issue requires adding a new function, locate the appropriate section within the file and append the new function, leaving existing code intact.
+  //    - Make your code clean, modular, and structured.
+  //    - For file modifications, integrate changes incrementally and preserve unrelated sections.
+  //    - If a file should be deleted as part of the issue, set its content to an empty string.
+
+  // 4. **Feedback Integration:**
+  //    - Incorporate any provided feedback accurately and modify your solution accordingly.
+
+  // 5. **Output Format:**
+  //    - Return your solution as a JSON object in the following format (without extra formatting):
+  //      { "filepath1": "content1", "filepath2": "content2", ... }
+
+  // Issue: ${issueBody}
+  // Feedback: ${feedback}
+  // Context: ${context}
+  // `;
+
+  //console.log("Sending request to Gemini API with prompt:", prompt);
   try {
     const result = await model.generateContent(prompt);
     const processedresult = extractJson(result.response.text());
@@ -683,11 +871,17 @@ async function handleIssueOpened({ octokit, payload }, reply = "") {
       const context = await query(payload.issue.body);
       console.log("Context:", context);
 
-      const processedContext = await fixContext(payload.issue.body, context);
+      const processedContext = await fixContext(
+        payload.issue.body,
+        context.documents
+      );
+
+      const contextObj = extractJson(processedContext);
 
       const fix = await generateFix(
         payload.issue.body,
-        processedContext,
+        contextObj.refinedContext,
+        contextObj.checklist,
         reply
       );
       if (fix) {
@@ -927,7 +1121,6 @@ app.webhooks.on(["issues.reopened", "issues.labeled"], async (context) => {
     console.log("Bot label detected, calling handleIssueOpened...");
     await handleIssueOpened(context);
   }
-  await handleIssueOpened(context);
 });
 
 app.webhooks.on("issue_comment.created", async (context) => {
