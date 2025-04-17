@@ -3,3 +3,5 @@ github api server - npx smee -u https://smee.io/rhgBgCzfQFuJTKyq -t http://local
 local server - npm run server
 
 chromadb server - chroma run --path ./chroma-data --host 127.0.0.1 --port 8000
+
+python codeBERT.py
