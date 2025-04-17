@@ -99,7 +99,7 @@ async function chunkFile(filePath, content) {
   let chunks = [];
 
   if (isCodeFile(ext)) {
-    chunks = chunkCode(content);
+    chunks = chunkCode(filePath, content);
   } else if ([".txt", ".md"].includes(ext)) {
     chunks = chunkText(content);
   } else if (ext === ".json") {
@@ -118,16 +118,17 @@ async function chunkFile(filePath, content) {
   }));
 }
 
-function chunkCode(content) {
-  const functionRegex =
-    /(def |function |const |let |var |class |public |private |protected )\s+\w+\s*\(.*?\)\s*{?/g;
-  let matches = content.split(functionRegex).filter(Boolean);
+function chunkCode(filePath, content) {
+  // const functionRegex =
+  //   /(def |function |const |let |var |class |public |private |protected )\s+\w+\s*\(.*?\)\s*{?/g;
+  // let matches = content.split(functionRegex).filter(Boolean);
 
-  if (matches.length === 1) {
-    matches = chunkByTokens(content, 300); // Fallback to token-based chunking
-  }
+  // if (matches.length === 1) {
+  //   matches = chunkByTokens(content, 300); // Fallback to token-based chunking
+  // }
 
-  return mergeSmallChunks(matches, 300);
+  // return mergeSmallChunks(matches, 300);
+  return [content.trim()];
 }
 
 function chunkText(content) {
@@ -235,20 +236,418 @@ function chunkByTokens(content, tokenSize) {
 //     const ids = validChunks.map(
 //       (chunk) => `doc_${chunk.file_path}_${chunk.chunk_index}`
 //     );
+//     const filepaths = validChunks.map((chunk) => `${chunk.file_path}`);
 //     const metadatas = validChunks.map((chunk) => ({
 //       file_path: chunk.file_path,
 //       chunk_index: chunk.chunk_index,
 //     }));
 
 //     // Add chunks to ChromaDB
-//     await collection.add({ documents, ids, metadatas });
+//     await collection.add({ documents, ids, filepaths, metadatas });
 //   } catch (error) {
 //     console.error("Error:", error);
 //   }
 // }
 
-const client = new ChromaClient({ host: "http://127.0.0.1:8000" });
+// import { pipeline, env } from "@xenova/transformers";
 
+// // --- Transformers.js Setup ---
+// env.allowLocalModels = false; // Set to false to use remote models only
+
+// // Define the embedding model
+// const modelName = "Xenova/bge-base-en-v1.5"; // BGE is good for retrieval tasks
+// const distanceMetric = "cosine"; // 'cosine' works best for normalized embeddings
+
+// // Singleton instance of the embedding model
+// let extractorPromise = null;
+// async function getExtractor() {
+//   if (!extractorPromise) {
+//     console.log(`Loading embedding model: ${modelName}...`);
+//     extractorPromise = pipeline("feature-extraction", modelName, {
+//       quantized: true, // Use smaller quantized models for efficiency
+//     });
+//   }
+//   return await extractorPromise;
+// }
+
+// // Define the embedding function compatible with ChromaDB
+// class TransformersJsEmbeddingFunction {
+//   async generate(texts) {
+//     const extractorInstance = await getExtractor(); // Ensure model is loaded
+//     console.log(`Generating embeddings for ${texts.length} text(s)...`);
+
+//     const output = await extractorInstance(texts, {
+//       pooling: "mean", // Use 'mean' pooling to get a fixed-size embedding
+//       normalize: true, // Normalize embeddings for cosine similarity
+//     });
+
+//     console.log("Embeddings generated.");
+//     console.log(output.tolist());
+//     return output.tolist(); // Convert tensor to JavaScript array
+//   }
+// }
+// // --- ChromaDB Client Setup ---
+
+// const client = new ChromaClient({ host: "http://127.0.0.1:8000" }); // Adjust host if needed
+// const embeddingFunction = new TransformersJsEmbeddingFunction();
+
+// // --- Core Logic Functions (from your original code, adapted) ---
+
+// /**
+//  * Adds or updates chunks in the ChromaDB collection using client-side embeddings.
+//  * @param {Array<object>} chunks - Array of chunk objects { file_path: string, chunk_index: number, content: string }
+//  */
+
+// const collectionName = "my_collection_bge_base";
+
+// async function run(chunks) {
+//   try {
+//     const heartbeat = await client.heartbeat();
+//     console.log("ChromaDB heartbeat:", heartbeat); // Good for debugging connection
+
+//     // Get or create the collection, providing the embedding function
+//     console.log(`Getting or creating collection: ${collectionName}`);
+//     const collection = await client.getOrCreateCollection({
+//       name: collectionName,
+//       embeddingFunction: embeddingFunction, // Crucial: Pass the function instance
+//       metadata: {
+//         "hnsw:space": distanceMetric,
+//         "hnsw:search_ef": 100, // Specify the distance metric
+//       },
+//     });
+//     console.log("Collection obtained:", collection.name);
+
+//     // Filter out chunks with empty or whitespace-only content
+//     const validChunks = chunks.filter(
+//       (chunk) => chunk && chunk.content && chunk.content.trim() !== ""
+//     );
+//     console.log(
+//       `Processing ${validChunks.length} valid chunks out of ${chunks.length} total.`
+//     );
+
+//     if (validChunks.length === 0) {
+//       console.log("No valid chunks with content to process.");
+//       return;
+//     }
+
+//     // Generate unique IDs for each chunk based on file path and index
+//     const ids = validChunks.map(
+//       (chunk) => `doc_${chunk.file_path}_${chunk.chunk_index}`
+//     );
+
+//     // --- Check existing documents to avoid duplicates and handle updates ---
+//     console.log("Checking for existing documents in the collection...");
+//     const existingDocs = await collection.get({
+//       ids: ids,
+//       include: ["documents"], // Only need documents to compare content
+//     });
+//     console.log(
+//       `Found ${existingDocs.ids.length} existing document IDs matching the current batch.`
+//     );
+
+//     const existingData = new Map();
+//     if (existingDocs && existingDocs.ids && existingDocs.documents) {
+//       existingDocs.ids.forEach((id, index) => {
+//         existingData.set(id, existingDocs.documents[index]);
+//       });
+//     }
+
+//     const chunksToAdd = []; // Chunks that are new or have modified content
+//     const idsToDelete = []; // IDs of chunks whose content has changed (will be re-added)
+//     const finalIds = []; // All IDs corresponding to chunksToAdd
+//     const finalMetadatas = []; // All metadatas corresponding to chunksToAdd
+//     const finalDocuments = []; // All document contents corresponding to chunksToAdd
+
+//     validChunks.forEach((chunk, idx) => {
+//       const id = ids[idx];
+//       // Prepend file_path to content for potential context during retrieval
+//       const newContent = `${chunk.file_path}: ${chunk.content}`;
+//       const metadata = {
+//         file_path: chunk.file_path,
+//         chunk_index: chunk.chunk_index,
+//       };
+
+//       if (!existingData.has(id)) {
+//         // This is a completely new chunk
+//         chunksToAdd.push({ id, content: newContent, metadata });
+//         finalIds.push(id);
+//         finalMetadatas.push(metadata);
+//         finalDocuments.push(newContent);
+//         // console.log(`Marked chunk ${id} for addition (new).`);
+//       } else if (existingData.get(id) !== newContent) {
+//         // This chunk exists but its content has changed
+//         idsToDelete.push(id); // Mark the old version for deletion
+//         chunksToAdd.push({ id, content: newContent, metadata }); // Mark the new version for addition
+//         finalIds.push(id);
+//         finalMetadatas.push(metadata);
+//         finalDocuments.push(newContent);
+//         // console.log(`Marked chunk ${id} for update (delete/add).`);
+//       } else {
+//         // Chunk exists and content is the same, do nothing.
+//         // console.log(`Chunk ${id} already exists and is up-to-date.`);
+//       }
+//     });
+
+//     // Delete outdated chunks first
+//     if (idsToDelete.length > 0) {
+//       console.log(`Deleting ${idsToDelete.length} outdated chunks...`);
+//       await collection.delete({ ids: idsToDelete });
+//       console.log("Deletion complete.");
+//     } else {
+//       console.log("No chunks marked for deletion.");
+//     }
+
+//     // Add new or updated chunks (Embeddings are generated by Transformers.js via embeddingFunction)
+//     if (chunksToAdd.length > 0) {
+//       console.log(
+//         `Adding ${chunksToAdd.length} new/updated chunks... This will trigger embedding generation.`
+//       );
+//       // The embeddingFunction will automatically be called by collection.add here
+//       await collection.add({
+//         ids: finalIds,
+//         metadatas: finalMetadatas,
+//         documents: finalDocuments,
+//       });
+//       console.log(`Successfully added/updated ${chunksToAdd.length} chunks.`);
+//     } else {
+//       console.log("No new or modified chunks require addition.");
+//     }
+
+//     console.log("Run process finished.");
+//   } catch (error) {
+//     console.error("Error during run process:", error);
+//     if (error.message && error.message.includes("Failed to fetch")) {
+//       console.error(
+//         "Fetch error: Is the ChromaDB server running and accessible at the specified host?"
+//       );
+//     } else if (error.message && error.message.includes("Embedding model")) {
+//       console.error(
+//         "Model error: Could not load or use the embedding model. Check model name and network connection."
+//       );
+//     }
+//     // Add more specific error handling if needed
+//   }
+// }
+
+// google embeddings
+
+// import { GoogleGenerativeAiEmbeddingFunction } from "chromadb";
+
+// const client = new ChromaClient({ host: "http://127.0.0.1:8000" });
+// const embedder = new GoogleGenerativeAiEmbeddingFunction({
+//   googleApiKey: geminiApiKey,
+// });
+
+// async function run(chunks) {
+//   try {
+//     const heartbeat = await client.heartbeat();
+//     console.log("ChromaDB heartbeat:", heartbeat);
+
+//     const collection = await client.getOrCreateCollection({
+//       name: "my_collection",
+//       //embeddingFunction: embedder,
+//     });
+
+//     console.log("Collection retrieved:", collection.name);
+
+//     // Group chunks by file_path
+//     const fileMap = new Map();
+//     for (const chunk of chunks) {
+//       if (!chunk.content.trim()) continue;
+//       if (!fileMap.has(chunk.file_path)) {
+//         fileMap.set(chunk.file_path, []);
+//       }
+//       fileMap.get(chunk.file_path).push(chunk.content);
+//     }
+
+//     if (fileMap.size === 0) {
+//       console.log("No valid files to add.");
+//       return;
+//     }
+
+//     // Prepare documents: one per file
+//     const documents = [];
+//     const ids = [];
+//     const metadatas = [];
+
+//     for (const [filePath, contents] of fileMap.entries()) {
+//       const fullContent = contents.join("\n");
+//       documents.push(`${filePath}:\n${fullContent}`);
+//       ids.push(`doc_${filePath}`);
+//       metadatas.push({ file_path: filePath });
+//     }
+
+//     // Add all at once (or batch if needed)
+//     const batchSize = 100;
+//     for (let i = 0; i < documents.length; i += batchSize) {
+//       const batchDocuments = documents.slice(i, i + batchSize);
+//       const batchIds = ids.slice(i, i + batchSize);
+//       const batchMetadatas = metadatas.slice(i, i + batchSize);
+
+//       console.log(`Processing batch ${i / batchSize + 1}`);
+
+//       await collection.add({
+//         documents: batchDocuments,
+//         ids: batchIds,
+//         metadatas: batchMetadatas,
+//       });
+//     }
+
+//     console.log("All files added successfully.");
+//   } catch (error) {
+//     console.error("Error:", error);
+//   }
+// }
+
+// async function query(issueBody) {
+//   const collection = await client.getOrCreateCollection({
+//     name: "my_collection",
+//     //embeddingFunction: embedder,
+//   });
+
+//   const results = await collection.query({
+//     queryTexts: [issueBody],
+//     nResults: 20,
+//   });
+
+//   console.log("Results:", results);
+//   return results;
+// }
+
+//truncated output
+// import { GoogleGenerativeAiEmbeddingFunction } from "chromadb";
+
+// const client = new ChromaClient({ host: "http://127.0.0.1:8000" });
+// const embedder = new GoogleGenerativeAiEmbeddingFunction({
+//   googleApiKey: geminiApiKey,
+// });
+// // const embedder = new HuggingFaceEmbeddingServerFunction({
+// //   url: "http://localhost:8001/embed",
+// // });
+// async function run(chunks) {
+//   try {
+//     const heartbeat = await client.heartbeat();
+//     console.log("ChromaDB heartbeat:", heartbeat);
+
+//     const collection = await client.getOrCreateCollection({
+//       name: "my_collection",
+//       embeddingFunction: embedder, // Ensure embedding function is used
+//     });
+
+//     console.log("Collection retrieved:", collection.name);
+
+//     // Filter out empty content
+//     const validChunks = chunks.filter((chunk) => chunk.content.trim() !== "");
+//     if (validChunks.length === 0) {
+//       console.log("No valid chunks to add.");
+//       return;
+//     }
+
+//     // Prepare data for ChromaDB
+//     const documents = validChunks.map(
+//       (chunk) => `${chunk.file_path}: ${chunk.content}`
+//     );
+//     const ids = validChunks.map(
+//       (chunk) => `doc_${chunk.file_path}_${chunk.chunk_index}`
+//     );
+//     const metadatas = validChunks.map((chunk) => ({
+//       file_path: chunk.file_path,
+//       chunk_index: chunk.chunk_index,
+//     }));
+
+//     // **Batch processing (Split into chunks of 100)**
+//     const batchSize = 100;
+//     for (let i = 0; i < documents.length; i += batchSize) {
+//       const batchDocuments = documents.slice(i, i + batchSize);
+//       const batchIds = ids.slice(i, i + batchSize);
+//       const batchMetadatas = metadatas.slice(i, i + batchSize);
+
+//       console.log(`Processing batch ${i / batchSize + 1}`);
+
+//       await collection.add({
+//         documents: batchDocuments,
+//         ids: batchIds,
+//         metadatas: batchMetadatas,
+//       });
+//     }
+
+//     console.log("All batches added successfully.");
+//   } catch (error) {
+//     console.error("Error:", error);
+//   }
+// }
+
+const BATCH_SIZE = 10;
+const MAX_PARALLEL = 5;
+
+async function getCodeBERTEmbeddingsInParallel(texts) {
+  const batches = [];
+  for (let i = 0; i < texts.length; i += BATCH_SIZE) {
+    batches.push(texts.slice(i, i + BATCH_SIZE));
+  }
+
+  const results = [];
+  for (let i = 0; i < batches.length; i += MAX_PARALLEL) {
+    const parallel = batches.slice(i, i + MAX_PARALLEL);
+
+    const embeddings = await Promise.all(
+      parallel.map(async (batch) => {
+        try {
+          const res = await fetch("http://localhost:5000/embed", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ texts: batch }),
+          });
+
+          if (!res.ok) {
+            const errText = await res.text();
+            console.error(
+              `❌ Embedding API returned ${res.status}: ${errText}`
+            );
+            throw new Error(`Embedding API error: ${res.status}`);
+          }
+
+          const json = await res.json();
+
+          if (!json.embeddings) {
+            console.error("❌ Missing 'embeddings' in response JSON:", json);
+            throw new Error("Invalid response: Missing 'embeddings'");
+          }
+
+          return json;
+        } catch (err) {
+          console.error("❌ Error fetching embeddings:", err.message);
+          throw err;
+        }
+      })
+    );
+
+    embeddings.forEach((e) => results.push(...e.embeddings));
+  }
+
+  return results;
+}
+
+// import { DefaultEmbeddingFunction } from "chromadb";
+// const embedder = new DefaultEmbeddingFunction();
+// const embedder = {
+//   generate: async (texts) => {
+//     const res = await Promise.all(
+//       texts.map(async (text) => {
+//         const response = await fetch("http://localhost:5000/embed", {
+//           method: "POST",
+//           headers: { "Content-Type": "application/json" },
+//           body: JSON.stringify({ text }),
+//         });
+//         const json = await response.json();
+//         return json.embedding;
+//       })
+//     );
+//     return res;
+//   },
+// };
+
+const client = new ChromaClient({ host: "http://127.0.0.1:8000" });
 async function run(chunks) {
   try {
     const heartbeat = await client.heartbeat();
@@ -256,70 +655,40 @@ async function run(chunks) {
 
     const collection = await client.getOrCreateCollection({
       name: "my_collection",
+      //embeddingFunction: embedder,
     });
 
-    console.log("Collection created or retrieved:", collection.name);
+    console.log("Collection retrieved:", collection.name);
 
-    // Filter out empty content
-    const validChunks = chunks.filter((chunk) => chunk.content.trim() !== "");
-
+    const validChunks = chunks.filter((chunk) => chunk.content.trim());
     if (validChunks.length === 0) {
       console.log("No valid chunks to add.");
       return;
     }
 
-    // Generate unique IDs for each chunk
+    const texts = validChunks.map(
+      (chunk) => `${chunk.file_path}:\n${chunk.content}`
+    );
     const ids = validChunks.map(
       (chunk) => `doc_${chunk.file_path}_${chunk.chunk_index}`
     );
+    const metadatas = validChunks.map((chunk) => ({
+      file_path: chunk.file_path,
+      chunk_index: chunk.chunk_index,
+    }));
 
-    // Get existing document IDs & content
-    const existingDocs = await collection.get({ ids });
+    console.log("Generating embeddings in parallel...");
+    //const embeddings = await getCodeBERTEmbeddingsInParallel(texts);
 
-    const existingData = new Map();
-    if (existingDocs.documents) {
-      existingDocs.ids.forEach((id, index) => {
-        existingData.set(id, existingDocs.documents[index]);
-      });
-    }
-
-    const chunksToAdd = [];
-    const chunksToDelete = [];
-
-    validChunks.forEach((chunk, idx) => {
-      const id = ids[idx];
-      const newContent = `${chunk.file_path}: ${chunk.content}`;
-
-      if (!existingData.has(id)) {
-        // New chunk - add it
-        chunksToAdd.push({ id, content: newContent, metadata: chunk });
-      } else if (existingData.get(id) !== newContent) {
-        // Modified chunk - delete old and re-add
-        chunksToDelete.push(id);
-        chunksToAdd.push({ id, content: newContent, metadata: chunk });
-      }
+    console.log("Adding to ChromaDB...");
+    await collection.add({
+      //embeddings: embeddings, // ✅ Fixed
+      ids: ids,
+      metadatas: metadatas,
+      documents: texts, // ✅ Fixed
     });
 
-    // Delete outdated chunks
-    if (chunksToDelete.length > 0) {
-      await collection.delete({ ids: chunksToDelete });
-      console.log(`Deleted ${chunksToDelete.length} outdated chunks.`);
-    }
-
-    // Add new/updated chunks
-    if (chunksToAdd.length > 0) {
-      await collection.add({
-        documents: chunksToAdd.map((c) => c.content),
-        ids: chunksToAdd.map((c) => c.id),
-        metadatas: chunksToAdd.map((c) => ({
-          file_path: c.metadata.file_path,
-          chunk_index: c.metadata.chunk_index,
-        })),
-      });
-      console.log(`Added ${chunksToAdd.length} new/updated chunks.`);
-    } else {
-      console.log("No new or modified chunks to add.");
-    }
+    console.log("All chunks added successfully.");
   } catch (error) {
     console.error("Error:", error);
   }
@@ -328,17 +697,73 @@ async function run(chunks) {
 async function query(issueBody) {
   const collection = await client.getOrCreateCollection({
     name: "my_collection",
+    //embeddingFunction: embedder, // Uncomment if you're using a custom embedder
+  });
+  //const embeddings = await getCodeBERTEmbeddingsInParallel([issueBody]);
+  //console.log("issueemb", embeddings);
+  const results = await collection.query({
+    //queryEmbeddings: embeddings,
+    queryTexts: [issueBody],
+    nResults: 10,
   });
 
-  // Perform the query to get relevant context for solving the issue
-  const results = await collection.query({
-    queryTexts: [issueBody], // Query the collection with the issue body
-    nResults: 20, // You can adjust this number depending on how many results you want to retrieve
-  });
-  // console.log("Relevant context paths:", results.documents);
   //console.log("Results:", results);
   return results;
 }
+
+// /**
+//  * Queries the collection for documents relevant to the issueBody.
+//  * @param {string} issueBody - The text to query with.
+//  * @returns {Promise<object|null>} The query results or null if an error occurs.
+//  */
+// async function query(issueBody) {
+//   if (!issueBody || issueBody.trim() === "") {
+//     console.log("Query text is empty, skipping query.");
+//     return null;
+//   }
+//   try {
+//     // Get the collection, ensuring embedding function is provided for query embedding generation
+//     console.log(`Getting collection ${collectionName} for query...`);
+//     const collection = await client.getOrCreateCollection({
+//       name: collectionName,
+//       embeddingFunction: embeddingFunction, // Required to embed the queryText
+//       metadata: { "hnsw:space": distanceMetric },
+//     });
+//     console.log("Collection obtained. Performing query...");
+
+//     // Perform the query. The embeddingFunction embeds the queryTexts automatically.
+//     const results = await collection.query({
+//       queryTexts: [issueBody], // The text(s) to find relevant documents for
+//       nResults: 20, // Number of results to return
+//       include: ["metadatas", "documents", "distances"], // Include useful information
+//     });
+
+//     console.log(`Query returned ${results?.ids?.[0]?.length ?? 0} results.`);
+//     // console.log("Query Results:", results); // Optional: Log raw results
+//     return results;
+//   } catch (error) {
+//     console.error("Error during query process:", error);
+//     if (error.message && error.message.includes("Failed to fetch")) {
+//       console.error(
+//         "Fetch error: Is the ChromaDB server running and accessible?"
+//       );
+//     } else if (
+//       error.message &&
+//       error.message.includes("Collection") &&
+//       error.message.includes("does not exist")
+//     ) {
+//       console.error(
+//         `Collection Error: The collection "${collectionName}" might not have been created yet. Ensure 'run' was executed successfully first.`
+//       );
+//     }
+//     return null; // Indicate failure
+//   }
+// }
+
+// Example usage:
+// (Assume `chunks` is an array of chunk objects with properties: content, file_path, and chunk_index)
+// run(chunks).then(() => console.log("Run complete."));
+// query("example issue text").then(results => console.log(results));
 
 // Function to determine how much context is needed
 
@@ -506,11 +931,96 @@ function extractJson(text) {
   return match ? JSON.parse(match[0]) : null;
 }
 
-async function fixContext(issueBody, context) {
+// **Part 2 - Create a Step-by-Step Checklist:**
+// 1. Parse the entire issue thoroughly before identifying the required tasks.
+// 2. Create a detailed **checklist** outlining each step necessary to address the issue.
+// 3. **Do not attempt to solve the issue**—only provide the checklist.
+// 4. Ensure that the checklist is clear, sequential, and directly related to the issue.
+async function fixContext(
+  issueBody,
+  context = "",
+  repoTree,
+  conversationHistory = "",
+  codeDiff = "",
+  commentText = ""
+) {
   const genAI = new GoogleGenerativeAI(geminiApiKey);
   const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+  const prompt = `
+  You are a JSON-only response agent. DO NOT explain your reasoning. DO NOT include any preamble or analysis.
+
+  Your task is twofold:
+  Respond ONLY in the exact JSON format provided at the end.
+
+  ---
+
+  **Part 1 - Identify Files to be Modified:**
+
+  1. Analyze the unfiltered context provided by the vector database.
+  2. Based on the given issue and the full context, determine which files are likely to be:
+     - Modified
+     - Added (if a required file or module does not exist, create a new path for it)
+     - Deleted (only if explicitly necessary)
+  3. Do NOT modify or rewrite any code at this stage.
+  4. Return only a JSON array of file paths (using the help of repoTree) that are relevant to solving the issue.
+  **IMPORTANT:** Use ONLY the valid file paths from the list provided be the repoTree. DO NOT invent or guess file paths.
+  5. Only include files that must be directly edited or created to resolve the issue.
+  6. If a necessary file does not exist based on the issue and context, include the appropriate new filepath.
+
+  **Part 2 - Create a Step-by-Step Checklist:**
+
+  1. Thoroughly analyze the provided issue.
+  2. Review the contents of all the files listed in Part 1 to understand:
+     - What logic or structure already exists
+     - What is missing, broken, or needs to be added/updated
+  3. Create a detailed checklist of steps needed to fully resolve the issue.
+  4. The checklist should be accurate, actionable, and reflect how to implement or fix the code properly.
+  5. **Preserve all existing code wherever possible.**
+  6. **Only add new logic or enhancements—do not overwrite or delete existing logic unless explicitly instructed.**
+  7. Do not include or write any code in this step.
+  8. The checklist must reference the exact file and purpose of the change.
+
+  ---
+
+  📌 YOU MUST RETURN YOUR OUTPUT IN THE FOLLOWING STRICT JSON FORMAT ONLY.
+  NO COMMENTS. NO EXPLANATIONS. JUST THE JSON BLOCK.
+  EXAMPLE JSON BLOCK:
+  \`\`\`json
+  {
+    "filePathsToBeChanged": ["rahul2.js", "mani.js", "file1.java", "file2.java"],
+    "checklist": {
+      "rahul2.js": [
+        "Step 1: Rename 'rahul.js' to 'rahul2.js'.",
+        "Step 2: Implement a function to find the smallest and largest elements in an array."
+      ],
+      "mani.js": [
+        "Step 1: Update imports if needed based on changes to rahul2.js.",
+        "Step 2: Refactor any references to the renamed file if applicable."
+      ],
+      "file1.java": [
+        "Step 1: Verify that class File1 is not affected by the changes.",
+        "Step 2: Ensure any dependencies needed for file2.java still function correctly."
+      ],
+      "file2.java": [
+        "Step 1: Retain existing logic that uses File1 object.",
+        "Step 2: Import or reference the new number guessing logic.",
+        "Step 3: Print the guessed number alongside existing outputs."
+      ]
+    }
+  }
+  \`\`\`
+
+  ONLY return output in that format. Do not return anything else.
+
+  **Issue:** ${issueBody}
+  **repoTree:** ${repoTree}
+  **ConversationHistory:** ${conversationHistory}
+  **CodeDiff:** ${codeDiff}
+  **CommentText** ${commentText}
+  **Unrefined Context:** ${context}`;
+
   //   const prompt = `
-  // Your task is to refine the unfiltered context provided by the vector database for RAG. Follow these rules:
+  // Your task is to refine the unfiltered context provided by the vector database for RAG and Create a checklist. Follow these rules:
 
   // 1. Include only context that is directly relevant to the given issue and dont try to solve that issue.
   // 2. Exclude any unrelated information.
@@ -521,43 +1031,50 @@ async function fixContext(issueBody, context) {
   //    filepath1: some other text
   // 5. Do not include any extra text beyond the refined context.
 
+  //   **Create a Detailed And Correct Step-by-Step Checklist:**
+  // 1. Parse the entire issue thoroughly before identifying the required tasks.
+  // 2. Create a detailed **checklist** outlining each step necessary to address the issue.
+  // 3. **Do not attempt to solve the issue**—only provide the checklist.
+  // 4. Ensure that the checklist is clear, sequential, and directly related to the issue.
+
   // Issue: ${issueBody}
-  // Unrefined Context: ${context}`;
+  // Unrefined Context: ${context};
 
-  const prompt = `
-  Your task is twofold:
+  // **Return your output strictly in the following JSON format:**
+  // \`\`\`json
+  // {
+  //   "refinedContext": "filepath1: \\"content1\\", filepath2: \\"content2\\"",
+  //   "checklist": [
+  //     "Step 1: ...",
+  //     "Step 2: ...",
+  //     "... etc."
+  //   ]
+  // }
+  // \`\`\` `
 
-  **Part 1 - Pick Relevant Context (Without Modification):**  
-  1. Analyze the unfiltered context provided by the vector database.   
-  2. **Most Important:** Do **not** modify or alter any file/chunk content—preserve them exactly as they are.
-  3. **PICK AS MANY CHUNKS AS POSSIBLE AND BE GENEROUS**. 
-  4. If relevant code segments that may be used elsewhere are found, include them without modification.  
-  5. Format the refined context as a string containing key-value pairs in this format:  
-    \`filepath1: "content1", filepath2: "content2", ...\`  
-    If additional relevant code segments exist, format them as:  
-    \`filepath1: some other text\`  
-  6. **Ensure that all included chunks remain fully intact.** Do not shorten, summarize, or modify them in any way.  
+  // const prompt = `
+  // You are an AI code assistant. Your task is to identify *only the parts of the code that need to be modified* to solve the issue, without solving them yet.
+  // ---
+  // **Your Responsibilities:**
+  // 1. **Parse the issue carefully.**
+  // 2. Using the provided unrefined context (retrieved via vector search), identify which files and code snippets are relevant to the issue.
+  // 3. Create a detailed step-by-step **modification checklist** describing what needs to be done, based on the issue and the code.
+  //   - Be specific about what function/line/block should be edited.
+  //   - Mention the *type* of change (add, delete, replace).
+  //   - Do not return the final code yet — just the *plan of action*.
+  // NOTE: IDENTIFY ALL FILES THAT NEEDS MODICATION AND TELL THE LLM IN DETAIL IN YOUR STEPS.
+  // ---
+  // **Output Format** (Strictly return valid JSON, no explanations outside it):
+  // {
+  //   "checklist": [
+  //     "Step 1: In file 'filepath1', locate function 'xyz' and replace the deprecated method with the new one.",
+  //     "Step 2: In file 'filepath2', add error handling logic after line 42 to catch missing values.",
+  //     "Step 3: In file 'filepath3', delete the unused import 'abc'."
+  //   ]
+  // }
 
-  **Part 2 - Create a Step-by-Step Checklist:**  
-  1. Parse the entire issue thoroughly before identifying the required tasks.  
-  2. Create a detailed **checklist** outlining each step necessary to address the issue.  
-  3. **Do not attempt to solve the issue**—only provide the checklist.  
-  4. Ensure that the checklist is clear, sequential, and directly related to the issue.  
-
-  **Return your output strictly in the following JSON format:**  
-  \`\`\`json
-  {
-    "refinedContext": "filepath1: \\"content1\\", filepath2: \\"content2\\"",
-    "checklist": [
-      "Step 1: ...",
-      "Step 2: ...",
-      "... etc."
-    ]
-  }
-  \`\`\`
-
-  **Issue:** ${issueBody}  
-  **Unrefined Context:** ${context}`;
+  // **Issue:** ${issueBody}
+  // **Unrefined Context:** ${context}`;
 
   //console.log("refining context:", prompt);
   try {
@@ -569,52 +1086,187 @@ async function fixContext(issueBody, context) {
     return "";
   }
 }
+
+// - For example, if the issue involves renaming a file, your checklist might be:
+//       1. Create a new file with the target name.
+//       2. Copy content from the original file.
+//       3. Verify and adjust if necessary.
+//       4. Delete or empty the original file if required.
+
 async function generateFix(
   issueBody,
   context = "",
   checklist = [],
-  feedback = ""
+  conversationHistory = "",
+  codeDiff = "",
+  commentText = ""
 ) {
   const genAI = new GoogleGenerativeAI(geminiApiKey2);
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
-  const prompt = `You are a GitHub Bot designed to help developers by precisely fixing or enhancing their code according to the provided issue, feedback, and context.
-  Requirements:
-  1. **Issue Analysis:**  
-    - Read and understand the issue, feedback, and context completely.
-    - Identify the specific areas or files that need modifications.
+  //   const prompt = `You are a GitHub Bot that outputs code modifications as a JSON diff.
+  // For each file that needs a change, output an array of changes. Each change must be a JSON object with the following keys:
+  // - "action": one of "modify", "add", "delete", or "empty".
+  // - "original": the exact snippet from the original file that is being modified or deleted. (For "add" actions, use an empty string.)
+  // - "new": the new code that should replace the original snippet, or the code to be added.
+  // - "contextBefore": (optional) a snippet of code from the file immediately preceding the change, to help locate the insertion point. If not applicable, use an empty string.
+  // NOTE: Dont delete exisiting code, and thorghly analyse all the files for updates.
+  // NOTE: Use all the files in your context throughly.
+  // NOTE: Dont modify original code(CAUTION: VERY SENSISTIVE TO EXTRA CHARACTERS AND FORMATING, NEEDS TO BE THE SAME AS INPUT) in your changes array.
+  // **Example Output (strictly JSON):**
+  // {
+  //   "File1.java": {
+  //     "changes": [
+  //       {
+  //         "action": "modify",
+  //         "original": "public int add(int a, int b) { return a + b; }",
+  //         "new": "public int add(int a, int b) { return a + b + 1; }",
+  //         "contextBefore": "public class File1 {"
+  //       },
+  //       {
+  //         "action": "delete",
+  //         "original": "private int unused = 0;",
+  //         "new": "",
+  //         "contextBefore": "public class File1 {"
+  //       }
+  //     ]
+  //   },
+  //   "utils/helpers.js": {
+  //     "changes": [
+  //       {
+  //         "action": "add",
+  //         "original": "",
+  //         "new": "console.log('New functionality added');",
+  //         "contextBefore": "function helper() {"
+  //       }
+  //     ]
+  //   }
+  // }
 
-  2. **Step-by-Step Process:**  
-    - USE a detailed checklist of steps to solve the issue.
-    - If there is any mistakes in the checklist given, Rectify it and use the checklist.  
-    - For example, if the issue involves renaming a file, your checklist might be:  
-      1. Create a new file with the target name.  
-      2. Copy content from the original file.  
-      3. Verify and adjust if necessary.  
-      4. Delete or empty the original file if required.
-    - Execute the checklist sequentially and backtrack if any step is incorrect.
+  // Your task is to generate a JSON diff strictly in this format based on the following inputs. Only output the JSON diff with no additional text, explanations, or markdown formatting. Do not wrap the JSON output in any backticks.
 
-  3. **Code Modification Guidelines:**  
-    - Modify only the specific sections directly related to the issue.  
-    - Preserve all unrelated working code intact.  
-    - If new functionality is needed, integrate it without overwriting existing code that might be used elsewhere.  
-    - Maintain a clean, modular, and well-structured code style that separates logic from implementation.
+  // Issue: ${issueBody}
+  // Feedback: ${feedback}
+  // Checklist: ${checklist}
+  // Context: ${context}`;
 
-  4. **Handling Feedback:**  
-    - Incorporate any provided feedback into your solution.
-    
-  5. **File Deletion:**  
-    - If instructed to delete a file, ensure the file remains but its content is empty.
+  //   - If there are any mistakes in the checklist given, rectify it and use the corrected checklist.
+  const prompt = `You are a GitHub Bot designed to help developers by precisely fixing or enhancing their code according to the provided issue, feedback, and context by giving only a JSON object like mentioned without changing the filepaths(even the case of the filepath, needs to be the exact same).
 
-  6. **Output Format:**  
-    - Return the final result as a JSON object mapping file paths to their content, for example:
-      {"filepath1": "content1", "filepath2": "content2"}  
-    - Do not wrap the output in any additional backticks or formatting.
+Requirements:
 
-  Issue: ${issueBody}
-  Feedback: ${feedback}
-  Checklist: ${checklist}
-  Context: ${context}`;
+1. **Issue Analysis:**
+   - Read and understand the issue, feedback, and context completely.
+   - Identify the specific areas or files that need modifications.
+
+2. **Step-by-Step Process:**
+   - STRICTLY USE the given detailed checklist to solve the issue.
+   - Dont even change the filepaths case.
+   - Execute the checklist sequentially and backtrack if any step is incorrect.
+
+3. **Code Modification Guidelines:**
+   - Think twice before modifying. Only update lines/sections directly related to the issue.
+   - DO NOT fix bugs unrelated to the issue unless instructed; instead, add a comment noting it.
+   - DO NOT remove existing code unless instructed.
+   - If new functionality is needed, integrate it carefully without breaking existing logic.
+   - Maintain a clean, modular, and well-structured code style that separates logic from implementation.
+
+4. **Handling Feedback:**
+   - Incorporate any provided feedback into your solution.
+
+5. **File Deletion:**
+   - If a file must be deleted, do not remove the file. Instead, empty its content.
+
+6. **STRICT Output Format:**
+   - Return output as a raw JSON object with the structure: { "filepath1": "updated full content1", "filepath2": "updated full content2", ... }
+   - PLEASE DONT CHANGE THE "filepath1" case to "Filepath1", PLEASE STICK TO THE FILEPATH CASE LIKE IN THE CHECKLIST PROVIDED.
+   - OUPUT ONLY THE ENTIRE FILE CONTENT.
+   - DO NOT include any explanation, markdown formatting, or extra text.
+   - DO NOT wrap the output in backticks or code blocks.
+   - ONLY return the VALID JSON object and nothing else.
+
+Issue: ${issueBody}
+Checklist: ${JSON.stringify(checklist)}
+**ConversationHistory:** ${conversationHistory}
+**CodeDiff:** ${codeDiff}
+**CommentText** ${commentText}
+Context: ${JSON.stringify(context)}`;
+
+  //   const prompt = `You are a GitHub Bot designed to help developers by precisely fixing or enhancing their code according to the provided issue, feedback, and context.
+  //   ---
+
+  //   🧠 **Goal:**
+  //   Make only the minimal necessary changes to the codebase to address the issue. Do not modify unrelated code.
+
+  //   ---
+
+  //   ### 🔍 1. Issue Analysis
+  //   - Carefully understand the issue, checklist, and code context before attempting any change.
+  //   - Identify exactly which files and line-level changes are required.
+
+  //   ---
+
+  //   ### 🛠️ 2. Checklist Execution
+  //   - Use the checklist to guide your fix.
+  //   - If the checklist is incorrect or missing steps, fix it silently and follow the corrected version.
+
+  //   ---
+
+  //   ### ✍️ 3. Code Modification Rules
+  //   - Only return the **minimal diff** required to fix the issue.
+  //   - **DO NOT** return the entire file contents.
+  //   - Each file should only contain:
+  //     - Lines that were **added**
+  //     - Lines that were **modified**
+  //     - Lines that were **removed** (return as empty string or a "DELETE" marker)
+  //   - Keep unrelated code **unchanged and unreturned**.
+
+  //   ---
+
+  //   ### 🗃️ 4. Output Format (Strict) only use double quotes.
+  //   - Only return a valid JSON object in this format:
+  //   \`\`\`json
+  //     {
+  //       "filepath1": {
+  //         "changes": [
+  //           {
+  //             "action": "modify",
+  //             "line": 42,
+  //             "original": "let x = 1;",
+  //             "new": "let x = 2;"
+  //           },
+  //           {
+  //             "action": "add",
+  //             "line": 45,
+  //             "new": "console.log('Debug info');"
+  //           }
+  //         ]
+  //       },
+  //       "filepath2": {
+  //         "changes": [
+  //           {
+  //             "action": "delete",
+  //             "line": 10,
+  //             "original": "const unused = true;"
+  //           }
+  //         ]
+  //       }
+  //     }
+  //  \`\`\`
+  //   ---
+
+  //   ### 🧹 5. Extra Notes
+  //   - If the file must be emptied (e.g., deletion is requested), return:
+  //     { "file_path": { "changes": [{ "action": "empty" }] } }
+  //   - Do not return extra text, markdown, explanations, or logs.
+
+  //   ---
+
+  //   ### Inputs:
+  //   Issue: ${issueBody}
+  //   Feedback: ${feedback}
+  //   Checklist: ${checklist}
+  //   Context: ${context}`;
 
   // const prompt = `You're a GitHub bot that helps developers by fixing or enhancing their code.
   // Fix the following issue by modifying necessary files, adding new files if required, or appending new code where appropriate.
@@ -667,14 +1319,63 @@ async function generateFix(
   //console.log("Sending request to Gemini API with prompt:", prompt);
   try {
     const result = await model.generateContent(prompt);
+    //console.log("rossie:0", result.response.text());
     const processedresult = extractJson(result.response.text());
-    console.log("Generated fix:", processedresult);
+    //console.log("Generated fix:", processedresult);
     return processedresult;
   } catch (error) {
     console.error("Error generating fix:", error);
     return "";
   }
 }
+
+// // Helper functions for fuzzy matching
+// function normalizeString(str) {
+//   return str
+//     .replace(/\s+/g, "")
+//     .replace(/[^a-zA-Z0-9]/g, "")
+//     .toLowerCase();
+// }
+
+// function levenshteinDistance(a, b) {
+//   const matrix = [];
+//   // increment along the first column of each row
+//   for (let i = 0; i <= b.length; i++) {
+//     matrix[i] = [i];
+//   }
+//   // increment each column in the first row
+//   for (let j = 0; j <= a.length; j++) {
+//     matrix[0][j] = j;
+//   }
+//   // Fill in the rest of the matrix
+//   for (let i = 1; i <= b.length; i++) {
+//     for (let j = 1; j <= a.length; j++) {
+//       if (b.charAt(i - 1) === a.charAt(j - 1)) {
+//         matrix[i][j] = matrix[i - 1][j - 1];
+//       } else {
+//         matrix[i][j] = Math.min(
+//           matrix[i - 1][j - 1] + 1, // substitution
+//           matrix[i][j - 1] + 1, // insertion
+//           matrix[i - 1][j] + 1 // deletion
+//         );
+//       }
+//     }
+//   }
+//   return matrix[b.length][a.length];
+// }
+
+// function similarityScore(s1, s2) {
+//   const normA = normalizeString(s1);
+//   const normB = normalizeString(s2);
+//   const distance = levenshteinDistance(normA, normB);
+//   const maxLen = Math.max(normA.length, normB.length);
+//   return maxLen === 0 ? 1 : (maxLen - distance) / maxLen;
+// }
+
+// // Check if two strings are mostly similar based on a threshold
+// function isMostlyMatch(a, b, threshold = 0.8) {
+//   return similarityScore(a, b) >= threshold;
+// }
 
 async function createPR(octokit, payload, fix) {
   const branchName = `auto-fix-${payload.issue.number}-${Date.now()}`;
@@ -725,6 +1426,448 @@ async function createPR(octokit, payload, fix) {
     );
 
     console.log("Tree SHA:", treeSha);
+
+    // const treeItems = await Promise.all(
+    //   Object.entries(fix).map(async ([filePath, newContent]) => {
+    //     try {
+    //       const { data: fileData } = await octokit.request(
+    //         "GET /repos/{owner}/{repo}/contents/{path}",
+    //         {
+    //           owner: payload.repository.owner.login,
+    //           repo: payload.repository.name,
+    //           path: filePath,
+    //         }
+    //       );
+
+    //       const existingContent = Buffer.from(
+    //         fileData.content,
+    //         "base64"
+    //       ).toString("utf-8");
+
+    //       // Skip if nearly identical (no-op)
+    //       const similarity = fuzz.ratio(existingContent, newContent);
+    //       if (similarity > 97) {
+    //         console.log(`Skipping ${filePath} (similarity: ${similarity}%)`);
+    //         return null;
+    //       }
+
+    //       // Mark as deletion if content is empty
+    //       if (!newContent || newContent.trim() === "") {
+    //         console.log(`Marking ${filePath} for deletion.`);
+    //         return {
+    //           path: filePath,
+    //           mode: "100644",
+    //           type: "blob",
+    //           sha: null,
+    //         };
+    //       }
+
+    //       return {
+    //         path: filePath,
+    //         mode: "100644",
+    //         type: "blob",
+    //         content: newContent,
+    //       };
+    //     } catch {
+    //       console.log(`Creating new file: ${filePath}`);
+    //       return {
+    //         path: filePath,
+    //         mode: "100644",
+    //         type: "blob",
+    //         content: newContent,
+    //       };
+    //     }
+    //   })
+    // );
+
+    // const filteredTree = treeItems.filter(Boolean);
+
+    // const { data: newTree } = await octokit.request(
+    //   "POST /repos/{owner}/{repo}/git/trees",
+    //   {
+    //     owner: payload.repository.owner.login,
+    //     repo: payload.repository.name,
+    //     base_tree: treeSha,
+    //     tree: filteredTree,
+    //   }
+    // );
+
+    // console.log("New tree created:", newTree.sha);
+
+    // const treeItems = await Promise.all(
+    //   Object.entries(fix).map(async ([filePath, diffObject]) => {
+    //     try {
+    //       const { data: fileData } = await octokit.request(
+    //         "GET /repos/{owner}/{repo}/contents/{path}",
+    //         {
+    //           owner: payload.repository.owner.login,
+    //           repo: payload.repository.name,
+    //           path: filePath,
+    //         }
+    //       );
+
+    //       console.log(`Existing file SHA for ${filePath}:`, fileData.sha);
+
+    //       let originalContent = Buffer.from(
+    //         fileData.content,
+    //         "base64"
+    //       ).toString("utf-8");
+    //       const lines = originalContent.split("\n");
+
+    //       // Apply diff to lines
+    //       if (diffObject?.changes?.[0]?.action === "empty") {
+    //         console.log(`Emptying file: ${filePath}`);
+    //         return {
+    //           path: filePath,
+    //           mode: "100644",
+    //           type: "blob",
+    //           content: "",
+    //         };
+    //       }
+
+    //       for (const change of diffObject.changes) {
+    //         const { action, line, original, new: newLine } = change;
+
+    //         if (action === "modify") {
+    //           if (lines[line - 1] !== original) {
+    //             console.warn(
+    //               `Mismatch at ${filePath}:${line}: expected '${original}', found '${
+    //                 lines[line - 1]
+    //               }'`
+    //             );
+    //           }
+    //           lines[line - 1] = newLine;
+    //         } else if (action === "add") {
+    //           lines.splice(line - 1, 0, newLine);
+    //         } else if (action === "delete") {
+    //           if (lines[line - 1] !== original) {
+    //             console.warn(
+    //               `Mismatch at ${filePath}:${line}: expected to delete '${original}', found '${
+    //                 lines[line - 1]
+    //               }'`
+    //             );
+    //           }
+    //           lines.splice(line - 1, 1);
+    //         }
+    //       }
+
+    //       const updatedContent = lines.join("\n");
+
+    //       return {
+    //         path: filePath,
+    //         mode: "100644",
+    //         type: "blob",
+    //         content: updatedContent,
+    //       };
+    //     } catch (error) {
+    //       console.log(`File ${filePath} does not exist. Creating new file.`);
+
+    //       // If new file with diff content (assume all lines are additions)
+    //       const lines = [];
+    //       for (const change of diffObject.changes || []) {
+    //         if (change.action === "add") {
+    //           lines[change.line - 1] = change.new;
+    //         }
+    //       }
+
+    //       return {
+    //         path: filePath,
+    //         mode: "100644",
+    //         type: "blob",
+    //         content: lines.join("\n"),
+    //       };
+    //     }
+    //   })
+    // );
+
+    // const { data: newTree } = await octokit.request(
+    //   "POST /repos/{owner}/{repo}/git/trees",
+    //   {
+    //     owner: payload.repository.owner.login,
+    //     repo: payload.repository.name,
+    //     base_tree: treeSha,
+    //     tree: treeItems,
+    //   }
+    // );
+
+    // console.log("New tree created:", newTree.sha);
+
+    // not working
+
+    // const treeItems = await Promise.all(
+    //   Object.entries(fix).map(async ([filePath, diffObject]) => {
+    //     try {
+    //       // Get file's existing SHA and content (if it exists)
+    //       const { data: fileData } = await octokit.request(
+    //         "GET /repos/{owner}/{repo}/contents/{path}",
+    //         {
+    //           owner: payload.repository.owner.login,
+    //           repo: payload.repository.name,
+    //           path: filePath,
+    //         }
+    //       );
+    //       console.log(`Existing file SHA for ${filePath}:`, fileData.sha);
+    //       let originalContent = Buffer.from(
+    //         fileData.content,
+    //         "base64"
+    //       ).toString("utf-8");
+
+    //       // If diff instructs to empty the file, return an empty content.
+    //       if (diffObject?.changes?.[0]?.action === "empty") {
+    //         console.log(`Emptying file: ${filePath}`);
+    //         return {
+    //           path: filePath,
+    //           mode: "100644",
+    //           type: "blob",
+    //           content: "",
+    //         };
+    //       }
+
+    //       // Apply each change based on fuzzy substring matching
+    //       for (const change of diffObject.changes) {
+    //         const { action, original, new: newLine, contextBefore } = change;
+
+    //         if (action === "modify") {
+    //           let index = originalContent.indexOf(original);
+    //           // If an exact match is not found, try fuzzy matching:
+    //           if (index === -1) {
+    //             // Slide through the content with a window similar in size to the original snippet.
+    //             for (
+    //               let i = 0;
+    //               i <= originalContent.length - original.length;
+    //               i++
+    //             ) {
+    //               const segment = originalContent.slice(i, i + original.length);
+    //               if (isMostlyMatch(segment, original)) {
+    //                 index = i;
+    //                 break;
+    //               }
+    //             }
+    //           }
+    //           if (index !== -1) {
+    //             console.log(
+    //               `Modifying snippet in ${filePath} at index ${index}`
+    //             );
+    //             // Replace the found segment (using the length of the original snippet) with the new line.
+    //             originalContent =
+    //               originalContent.slice(0, index) +
+    //               newLine +
+    //               originalContent.slice(index + original.length);
+    //           } else {
+    //             console.warn(
+    //               `Could not find snippet to modify in ${filePath}: "${original}"`
+    //             );
+    //           }
+    //         } else if (action === "delete") {
+    //           let index = originalContent.indexOf(original);
+    //           if (index === -1) {
+    //             for (
+    //               let i = 0;
+    //               i <= originalContent.length - original.length;
+    //               i++
+    //             ) {
+    //               const segment = originalContent.slice(i, i + original.length);
+    //               if (isMostlyMatch(segment, original)) {
+    //                 index = i;
+    //                 break;
+    //               }
+    //             }
+    //           }
+    //           if (index !== -1) {
+    //             console.log(
+    //               `Deleting snippet in ${filePath} at index ${index}`
+    //             );
+    //             originalContent =
+    //               originalContent.slice(0, index) +
+    //               originalContent.slice(index + original.length);
+    //           } else {
+    //             console.warn(
+    //               `Could not find snippet to delete in ${filePath}: "${original}"`
+    //             );
+    //           }
+    //         } else if (action === "add") {
+    //           // For additions, if a contextBefore is provided, insert after it.
+    //           if (contextBefore) {
+    //             const idx = originalContent.indexOf(contextBefore);
+    //             if (idx !== -1) {
+    //               const insertionIndex = idx + contextBefore.length;
+    //               originalContent =
+    //                 originalContent.slice(0, insertionIndex) +
+    //                 "\n" +
+    //                 newLine +
+    //                 originalContent.slice(insertionIndex);
+    //             } else {
+    //               console.warn(
+    //                 `Context marker not found for addition in ${filePath}: "${contextBefore}"`
+    //               );
+    //               // Optionally append if context marker isn't found:
+    //               originalContent += "\n" + newLine;
+    //             }
+    //           } else {
+    //             // If no context is provided, append the new line at the end.
+    //             originalContent += "\n" + newLine;
+    //           }
+    //         }
+    //       }
+
+    //       return {
+    //         path: filePath,
+    //         mode: "100644",
+    //         type: "blob",
+    //         content: originalContent,
+    //       };
+    //     } catch (error) {
+    //       console.log(`File ${filePath} does not exist. Creating new file.`);
+    //       // For new files, assume all changes are "add" actions.
+    //       let newContent = "";
+    //       for (const change of diffObject.changes || []) {
+    //         if (change.action === "add") {
+    //           newContent += change.new + "\n";
+    //         }
+    //       }
+    //       return {
+    //         path: filePath,
+    //         mode: "100644",
+    //         type: "blob",
+    //         content: newContent.trim(),
+    //       };
+    //     }
+    //   })
+    // );
+
+    // const filteredTree = treeItems.filter(Boolean);
+
+    // const { data: newTree } = await octokit.request(
+    //   "POST /repos/{owner}/{repo}/git/trees",
+    //   {
+    //     owner: payload.repository.owner.login,
+    //     repo: payload.repository.name,
+    //     base_tree: treeSha,
+    //     tree: filteredTree,
+    //   }
+    // );
+
+    // console.log("New tree created:", newTree.sha);
+    // working but bad search
+
+    // const treeItems = await Promise.all(
+    //   Object.entries(fix).map(async ([filePath, diffObject]) => {
+    //     try {
+    //       // Get file's existing SHA and content (if it exists)
+    //       const { data: fileData } = await octokit.request(
+    //         "GET /repos/{owner}/{repo}/contents/{path}",
+    //         {
+    //           owner: payload.repository.owner.login,
+    //           repo: payload.repository.name,
+    //           path: filePath,
+    //         }
+    //       );
+    //       console.log(`Existing file SHA for ${filePath}:`, fileData.sha);
+    //       let originalContent = Buffer.from(
+    //         fileData.content,
+    //         "base64"
+    //       ).toString("utf-8");
+
+    //       // If diff instructs to empty the file, return an empty content.
+    //       if (diffObject?.changes?.[0]?.action === "empty") {
+    //         console.log(`Emptying file: ${filePath}`);
+    //         return {
+    //           path: filePath,
+    //           mode: "100644",
+    //           type: "blob",
+    //           content: "",
+    //         };
+    //       }
+
+    //       // Apply each change based on substring matching
+    //       for (const change of diffObject.changes) {
+    //         const { action, original, new: newLine, contextBefore } = change;
+
+    //         if (action === "modify") {
+    //           const index = originalContent.indexOf(original);
+    //           if (index !== -1) {
+    //             // Replace the first occurrence of the original snippet
+    //             originalContent = originalContent.replace(original, newLine);
+    //           } else {
+    //             console.warn(
+    //               `Could not find snippet to modify in ${filePath}: "${original}"`
+    //             );
+    //           }
+    //         } else if (action === "delete") {
+    //           const index = originalContent.indexOf(original);
+    //           if (index !== -1) {
+    //             // Remove the snippet by replacing it with an empty string
+    //             originalContent = originalContent.replace(original, "");
+    //           } else {
+    //             console.warn(
+    //               `Could not find snippet to delete in ${filePath}: "${original}"`
+    //             );
+    //           }
+    //         } else if (action === "add") {
+    //           // For additions, if a contextBefore is provided, insert after it.
+    //           if (contextBefore) {
+    //             const idx = originalContent.indexOf(contextBefore);
+    //             if (idx !== -1) {
+    //               const insertionIndex = idx + contextBefore.length;
+    //               originalContent =
+    //                 originalContent.slice(0, insertionIndex) +
+    //                 "\n" +
+    //                 newLine +
+    //                 originalContent.slice(insertionIndex);
+    //             } else {
+    //               console.warn(
+    //                 `Context marker not found for addition in ${filePath}: "${contextBefore}"`
+    //               );
+    //               // Optionally append if context marker isn't found:
+    //               originalContent += "\n" + newLine;
+    //             }
+    //           } else {
+    //             // If no context is provided, append the new line at the end.
+    //             originalContent += "\n" + newLine;
+    //           }
+    //         }
+    //       }
+
+    //       return {
+    //         path: filePath,
+    //         mode: "100644",
+    //         type: "blob",
+    //         content: originalContent,
+    //       };
+    //     } catch (error) {
+    //       console.log(`File ${filePath} does not exist. Creating new file.`);
+    //       // For new files, assume all changes are "add" actions.
+    //       let newContent = "";
+    //       for (const change of diffObject.changes || []) {
+    //         if (change.action === "add") {
+    //           newContent += change.new + "\n";
+    //         }
+    //       }
+    //       return {
+    //         path: filePath,
+    //         mode: "100644",
+    //         type: "blob",
+    //         content: newContent.trim(),
+    //       };
+    //     }
+    //   })
+    // );
+
+    // const filteredTree = treeItems.filter(Boolean);
+
+    // const { data: newTree } = await octokit.request(
+    //   "POST /repos/{owner}/{repo}/git/trees",
+    //   {
+    //     owner: payload.repository.owner.login,
+    //     repo: payload.repository.name,
+    //     base_tree: treeSha,
+    //     tree: filteredTree,
+    //   }
+    // );
+
+    // console.log("New tree created:", newTree.sha);
+
+    //working
 
     // Step 4: Create a new tree with multiple file updates
     const treeItems = await Promise.all(
@@ -832,11 +1975,16 @@ async function createPR(octokit, payload, fix) {
 const messageForNewIssues =
   "Thanks for opening a new issue! Our bot will attempt to fix it automatically.";
 
-async function handleIssueOpened({ octokit, payload }, reply = "") {
+async function handleIssueOpened(
+  { octokit, payload },
+  conversationHistory = "",
+  codeDiff = "",
+  commentText = ""
+) {
   console.log(`Received an issue event for #${payload.issue.number}`);
 
   try {
-    if (!reply) {
+    if (!commentText || !conversationHistory || !codeDiff) {
       await octokit.request(
         "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
         {
@@ -869,23 +2017,239 @@ async function handleIssueOpened({ octokit, payload }, reply = "") {
 
       await run(chunks);
       const context = await query(payload.issue.body);
-      console.log("Context:", context);
+      //console.log("Context:", context);
 
+      const structure = [];
+      // Corrected getRepoFileStructure function
+      async function getRepoFileStructure(owner, repo, path = "") {
+        try {
+          const { data } = await octokit.request(
+            "GET /repos/{owner}/{repo}/contents/{path}",
+            {
+              owner,
+              repo,
+              path,
+            }
+          );
+
+          const items = Array.isArray(data) ? data : [data];
+
+          for (const item of items) {
+            const node = {
+              path: item.path,
+            };
+
+            if (item.type === "dir") {
+              node.children = await getRepoFileStructure(
+                owner,
+                repo,
+                item.path
+              );
+            }
+            const ext = fpath.extname(item.path).toLowerCase();
+            if (
+              isCodeFile(ext) ||
+              [".txt", ".md", ".json", ".csv"].includes(ext)
+            )
+              structure.push(node);
+          }
+          return structure;
+        } catch (err) {
+          console.error(`Failed at path "${path}":`, err.message);
+          return [];
+        }
+      }
+
+      // Corrected call for getRepoFileStructure
+      const repoTree = await getRepoFileStructure(
+        payload.repository.owner.login,
+        payload.repository.name
+      );
+      console.warn("structure:", repoTree);
       const processedContext = await fixContext(
         payload.issue.body,
-        context.documents
+        context.documents,
+        repoTree,
+        conversationHistory,
+        codeDiff,
+        commentText
       );
+
+      //console.log("docs", context.documents[0]);
+      const rawDocs = context.documents[0]; // unwrap the inner array
+      console.log("Context Docs:", rawDocs);
+      function extractDocObject(docString) {
+        const separatorIndex = docString.indexOf(":");
+        if (separatorIndex === -1) return null;
+        const path = docString.slice(0, separatorIndex).trim();
+        const content = docString.slice(separatorIndex + 1).trim();
+        return { path, content };
+      }
+
+      const parsedDocs = rawDocs.map(extractDocObject);
+      //console.log("parsedDocs", parsedDocs);
 
       const contextObj = extractJson(processedContext);
 
-      const fix = await generateFix(
-        payload.issue.body,
-        contextObj.refinedContext,
-        contextObj.checklist,
-        reply
-      );
-      if (fix) {
-        await createPR(octokit, payload, fix);
+      function correctFilePaths(outputJson, repoTree) {
+        const flatPaths = repoTree.map((obj) => obj.path);
+        const correctedOutput = {
+          filePathsToBeChanged: [],
+          checklist: {},
+        };
+
+        function findPathForFile(filename) {
+          const matches = flatPaths.filter(
+            (path) => path.endsWith(`/${filename}`) || path === filename
+          );
+          return matches.length > 0 ? matches[0] : null;
+        }
+
+        for (const incorrectPath of outputJson.filePathsToBeChanged) {
+          const filename = incorrectPath.split("/").pop();
+          const correctedPath = findPathForFile(filename) || incorrectPath;
+
+          // Add to corrected file list
+          correctedOutput.filePathsToBeChanged.push(correctedPath);
+
+          // Update checklist mapping
+          if (outputJson.checklist[incorrectPath]) {
+            correctedOutput.checklist[correctedPath] =
+              outputJson.checklist[incorrectPath];
+          } else {
+            // Try fuzzy match by filename in checklist keys
+            const matchingKey = Object.keys(outputJson.checklist).find((k) =>
+              k.endsWith(`/${filename}`)
+            );
+            if (matchingKey) {
+              correctedOutput.checklist[correctedPath] =
+                outputJson.checklist[matchingKey];
+            }
+          }
+        }
+
+        return correctedOutput;
+      }
+
+      const correctedContextObj = correctFilePaths(contextObj, repoTree);
+      const filePathsToBeChanged = correctedContextObj.filePathsToBeChanged;
+      console.log("filePathsToBeChanged", filePathsToBeChanged);
+
+      //get all files acc to filepathstobechanged from the git repo and append it to parsed docs
+      // Function to fetch a single file from the repo
+      async function fetchFile(filePath) {
+        try {
+          const { data: fileData } = await octokit.request(
+            "GET /repos/{owner}/{repo}/contents/{path}",
+            {
+              owner: payload.repository.owner.login,
+              repo: payload.repository.name,
+              path: filePath,
+            }
+          );
+          // Decode content from Base64
+          const content = Buffer.from(fileData.content, "base64").toString(
+            "utf-8"
+          );
+          console.log(`File found: ${filePath}. Fetching file.`);
+          return { path: filePath, content };
+        } catch (error) {
+          if (error.status === 404) {
+            console.warn(`File not found: ${filePath}. Skipping this file.`);
+            return null;
+          } else {
+            // For other errors, rethrow or handle appropriately
+            throw error;
+          }
+        }
+      }
+
+      // Example: fetch all files from filePathsToBeChanged and update parsedDocs
+      async function updateParsedDocs(filePathsToBeChanged) {
+        const fetchedDocs = await Promise.all(
+          filePathsToBeChanged.map(
+            async (filePath) => await fetchFile(filePath)
+          )
+        );
+        // Filter out any files that returned null (not found)
+        const validDocs = fetchedDocs.filter((doc) => doc !== null);
+        // Append these to your existing parsedDocs (or replace, depending on your use case)
+        parsedDocs.push(...validDocs);
+        //console.log("Updated parsedDocs:", parsedDocs);
+      }
+
+      // Then, call the function before further processing:
+      await updateParsedDocs(filePathsToBeChanged);
+
+      const allFixes = {};
+
+      for (const filePath of filePathsToBeChanged) {
+        // Find the document for the current file
+        const fileDoc = parsedDocs.find((doc) => doc?.path === filePath);
+        //console.log("fileDoc:", fileDoc);
+        if (!fileDoc) {
+          console.warn(`No document found for ${filePath}`);
+          continue;
+        }
+
+        // Get the checklist for this file
+        const checklistSteps = correctedContextObj.checklist[filePath] || [];
+
+        // Log file content (for debugging)
+        const docContent = fileDoc?.content || "";
+        //console.log("docContent for", filePath, ":", docContent);
+
+        // (Optional) Compute token count if needed
+        // const checklistText = checklistSteps.join("\n");
+        // const totalTokens = getTokenCount(docContent) + getTokenCount(checklistText);
+
+        // For each file, create a group that contains only this file
+        const groupDocs = [fileDoc];
+        const groupChecklist = { [filePath]: checklistSteps };
+
+        // Call generateFix for the single file group
+        const fixPart = await generateFix(
+          payload.issue.body,
+          groupDocs,
+          groupChecklist,
+          conversationHistory,
+          codeDiff,
+          commentText
+        );
+        //console.warn("Fix Part for", filePath, ":", fixPart);
+
+        // Merge fixPart into the overall object; if fixPart has changes for a file, merge their changes arrays
+        for (const file in fixPart) {
+          if (allFixes[file]) {
+            allFixes[file].changes = allFixes[file].changes.concat(
+              fixPart[file].changes
+            );
+          } else {
+            allFixes[file] = fixPart[file];
+          }
+        }
+      }
+
+      // Convert the final fix object to a JSON string for further use
+      // const fix = JSON.stringify(allFixes, null, 2);
+      //console.log("Final Fix:", allFixes);
+
+      // const processedContext = await fixContext(
+      //   payload.issue.body,
+      //   context.documents
+      // );
+
+      // const contextObj = extractJson(processedContext);
+      // const filePathsToBeChanged = contextObj.filePathsToBeChanged;
+
+      // const fix = await generateFix(
+      //   payload.issue.body,
+      //   context.documents,
+      //   contextObj.checklist,
+      //   reply
+      // );
+      if (allFixes) {
+        await createPR(octokit, payload, allFixes);
       }
     })();
   } catch (error) {
@@ -1084,7 +2448,9 @@ async function handleBotPRComment({ octokit, payload }) {
 
     if (response[0] == "2" || response[0] == "3") {
       await handleIssueOpened(
-        { octokit, payload, conversationHistory, codeDiff },
+        { octokit, payload },
+        conversationHistory,
+        codeDiff,
         commentText
       );
     }
